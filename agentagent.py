@@ -8,30 +8,17 @@ load_dotenv(override=True)
 #request 代替Anthropic
 import requests
 import json
+
+from pathlib import Path
 API_KEY = os.getenv("API_KEY")
 BASE_URL = os.getenv("BASE_URL")
 MODEL_NAME = os.getenv("MODEL_NAME")
 END_POINT = f"{BASE_URL.rstrip('/')}/chat/completions"
+WORKDIR = Path.cwd()
+
 
 SYSTEM_PROMPT = f"你的Agent在 {os.getcwd()}运行，请根据系统提示完成任务"
 
-# OPENAI TOOLS 定义
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "在本地执行shell命令",
-            "parameters": {
-                "type": "object",
-                "properties" :{
-                    "command": {"type": "string", "description": "要执行的shell命令"}
-                },
-                "required": ["command"]
-            }
-        }
-    }
-]
 
 #============Bash Tool 实现============
 def run_bash(command: str) -> str:
@@ -52,6 +39,144 @@ def run_bash(command: str) -> str:
         return "Error: 命令执行超时"
     except (FileNotFoundError, OSError) as e:
         return f"Error: 命令执行失败\n错误信息: {str(e)}"
+    
+#============Python Tool 实现============
+def safe_path(path: str) -> Path:
+    """检查路径是否在工作目录内"""
+    path = (WORKDIR / path)
+    if not path.is_relative_to(WORKDIR):
+        raise ValueError(f"路径{path}超出工作目录{WORKDIR}范围")
+    return path
+
+def run_read(path:str, limit: int | None = None) -> str:
+    """读取文件内容，支持限制行数"""
+    try:
+        lines = safe_path(path).read_text(encoding="utf-8").splitlines()
+        if limit and limit < len(lines):
+            lines = lines[: limit] + [f"...还有{len(lines) - limit}行未显示"]
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: 读取文件失败\n错误信息: {str(e)}"
+
+def run_write(path: str, content: str) -> str:
+    """写入文件内容"""
+    try:
+        file_path = safe_path(path)
+        file_path.parent.mkdir(parents = True, exist_ok = True)
+        file_path.write_text(content, encoding="utf-8")
+        return f"文件写入{path}成功"
+    except Exception as e:
+        return f"Error: 写入文件失败\n错误信息: {str(e)}"
+
+def run_edit(path: str, old_text: str, new_text: str) -> str:
+    """编辑文件内容"""
+    try:
+        file_path = safe_path(path)
+        text = file_path.read_text(encoding = "utf-8")
+        if old_text not in text:
+            return f"Error: 文件{path}中没有找到旧文本"
+        file_path.write_text(text.replace(old_text, new_text, 1), encoding = "utf-8")
+        return f"文件{path}编辑成功"
+    except Exception as e:
+        return f"Error: 编辑文件失败\n错误信息: {str(e)}"
+
+def run_glob(pattern:str) -> str:
+    """查找文件"""
+    import glob as g
+    try:
+        results = []
+        for match in g.glob(pattern, root_dir = WORKDIR):
+            if (WORKDIR / match).resolve().is_relative_to(WORKDIR):
+                results.append(match)
+        return "\n".join(results) if results else "Error: 没有找到文件"
+    except Exception as e:
+        return f"Error: 查找文件失败\n错误信息: {str(e)}"
+
+# =============OPENAI TOOLS 定义============
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "在本地执行shell命令",
+            "parameters": {
+                "type": "object",
+                "properties" :{
+                    "command": {"type": "string", "description": "要执行的shell命令"}
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read",
+            "description": "读取文件内容",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "要读取的文件路径"},
+                    "limit": {"type": "integer", "description": "要读取的行数，默认不限制"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write",
+            "description": "写入文件内容",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "要写入的文件路径"},
+                    "content": {"type": "string", "description": "要写入的内容"}
+                },
+                "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit",
+            "description": "编辑文件内容",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "要编辑的文件路径"},
+                    "old_text": {"type": "string", "description": "要编辑的旧文本"},
+                    "new_text": {"type": "string", "description": "要编辑的新文本"}
+                },
+                "required": ["path", "old_text", "new_text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "glob",
+            "description": "查找文件",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "要查找的文件模式"}
+                },
+                "required": ["pattern"]
+            }
+        }
+    }
+]
+
+TOOL_HANDLERS = {
+    "read": run_read,
+    "write": run_write,
+    "edit": run_edit,
+    "glob": run_glob,
+    "bash": run_bash,
+}
 
 # ========== 核心Agent循环====================
 def agent_loop(messages: list):
@@ -81,27 +206,27 @@ def agent_loop(messages: list):
         if not msg.get("tool_calls"):
             return
         
-        # 处理tool_calls
+        # 处理tool_calls：用 TOOL_HANDLERS 统一分发
         tool_results = []
         for tool_call in msg["tool_calls"]:
             func = tool_call["function"]
+            name = func["name"]
+            args = json.loads(func.get("arguments") or "{}")
+            handler = TOOL_HANDLERS.get(name)
 
-            if func["name"] == "bash":
-                args = json.loads(func["arguments"])
-                command = args["command"]
-                print(f"执行命令: {command}")
-                out_put = run_bash(command)
-                print(f"命令输出: {out_put}")
+            if handler is None:
+                output = f"Error: 未找到工具{name}的处理器"
+            else:
+                print (f"使用工具: {name} , 参数: {args}")
+                output = handler(**args)
+                print(f"工具{name}输出: {output}")
 
-                #组装工具返回消息格式
-                tool_results.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call["id"],
-                    "name": func["name"],
-                    "content": out_put
-                })
-        
-        # 必须用 extend：逐条追加 tool 消息，不能 append 整个列表
+            tool_results.append({
+                "role": "tool",
+                "tool_call_id": tool_call["id"],
+                "content": output
+            })
+
         messages.extend(tool_results)
 
 # ========== 终端交互入口 ==========
