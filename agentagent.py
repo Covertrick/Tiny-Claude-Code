@@ -178,6 +178,68 @@ TOOL_HANDLERS = {
     "bash": run_bash,
 }
 
+#=========== 权限判断 ======================
+DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"]
+
+def check_deny_list(command: str) -> str | None:
+    """第一重判断：检测禁止操作直接拒绝"""
+    for pattern in DENY_LIST:
+        if pattern in command:
+            return f"Error: 危险操作被拒绝: {pattern}"
+    return None
+
+PERMISSION_RULES = [
+    {
+        "tools":["read", "write", "edit"],
+        "check": lambda args: not (WORKDIR /args.get("path", "")).resolve().is_relative_to(WORKDIR),
+        "message": "Error: 路径超出工作目录范围"
+    },
+    {
+        "tools": ["bash"],
+        "check": lambda args: any(
+            kw in args.get("command", "")
+            for kw in [
+                "rm ",
+                "> /etc/",
+                "chmod 777",
+                "C:\\Windows",
+                "C:\\Users",
+                "/etc/",
+            ]
+        ),
+        "message": "Error: 危险操作被拒绝",
+    },
+]
+
+def check_rules(tool_name: str, args: dict) -> str | None:
+    """第二重判断：检测工具权限"""
+    for rule in PERMISSION_RULES:
+        if tool_name in rule["tools"]:
+            if rule["check"](args):
+                return rule["message"]
+    return None
+
+def ask_user(tool_name: str, args: dict, reason: str) -> str | None:
+    """第三重判断：询问用户是否继续"""
+    print(f"\n\033[33m[permission] {reason}\033[0m")
+    print(f"工具: {tool_name}, 参数: {args}")
+    choice = input("是否继续？(y/n): ").strip().lower()
+    return "allow" if choice == "y" else "deny"
+
+def check_permission(name: str, args: dict) -> bool:
+    """管道：三道闸门依次检查"""
+    if name == "bash":
+        reason = check_deny_list(args.get("command", ""))
+        if reason:
+            print(f"\n\033[31m[blocked] {reason}\033[0m")
+            return False
+    reason = check_rules(name, args)
+    if reason:
+        decision = ask_user(name, args, reason)
+        if decision == "deny":
+            return False
+    return True
+
 # ========== 核心Agent循环====================
 def agent_loop(messages: list):
     while True:
@@ -212,6 +274,17 @@ def agent_loop(messages: list):
             func = tool_call["function"]
             name = func["name"]
             args = json.loads(func.get("arguments") or "{}")
+
+            # 权限检查（传入已解析的 name / args）
+            if not check_permission(name, args):
+                tool_results.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call["id"],
+                    "content": "Error: 操作被拒绝"
+                })
+                continue
+
+            # 执行工具
             handler = TOOL_HANDLERS.get(name)
 
             if handler is None:
