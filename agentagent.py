@@ -4,6 +4,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+import ast
+
 load_dotenv(override=True)
 
 #request 代替Anthropic
@@ -18,8 +20,12 @@ END_POINT = f"{BASE_URL.rstrip('/')}/chat/completions"
 WORKDIR = Path.cwd()
 
 
-SYSTEM_PROMPT = f"你的Agent在 {os.getcwd()}运行，请根据系统提示完成任务"
-
+SYSTEM_PROMPT = (
+    f"你是一个在 {WORKDIR} 运行的编程 Agent。"
+    "开始任何多步骤任务前，先用 todo_write 规划步骤；"
+    "执行过程中及时更新任务状态（pending / in_progress / completed）。"
+    "同一时间只能有一个 in_progress。"
+)
 
 #============Bash Tool 实现============
 def _decode_shell_output(data: bytes | None) -> str:
@@ -102,6 +108,80 @@ def run_glob(pattern:str) -> str:
     except Exception as e:
         return f"Error: 查找文件失败\n错误信息: {str(e)}"
 
+#============= 结构化状态，模型更新============
+class ToolManager:
+    def __init__(self):
+        self.items: list[dict] = []
+    
+    def update(self, todos: list | str) -> str:
+        """更新任务列表"""
+        if isinstance(todos, str):
+            try:
+                todos = json.loads(todos)
+            except json.JSONDecodeError:
+                try:
+                    todos = ast.literal_eval(todos)
+                except (SyntaxError, ValueError) as e:
+                    raise ValueError(" todos 应该是一个有效的JSON字符串或Python列表") from e
+        
+        if not isinstance(todos, list):
+            raise ValueError(" todos 应该是一个有效的JSON字符串或Python列表")
+        if len(todos) > 20:
+            raise ValueError(" todos 不能超过20个")
+        
+        # 逐条校验任务列表
+        validated = [] # 有效任务
+        in_progress_count = 0 # 进行中任务数
+        for index, todo in enumerate(todos):
+            if not isinstance(todo, dict):
+                raise ValueError(f"任务{index}应该是一个字典")
+            
+            content = str(todo.get("content", "")).strip() # 任务内容
+            status = str(todo.get("status", "pending")).strip().lower() # 任务状态
+            if not content:
+                raise ValueError(f"任务{index}内容不能为空")
+            if status not in ["pending", "in_progress", "completed"]:
+                raise ValueError(f"任务{index}状态必须为pending, in_progress, completed")
+            if status == "in_progress":
+                in_progress_count += 1
+            validated.append({"content": content, "status": status})
+        
+        if in_progress_count > 1:
+            raise ValueError("不能同时进行多个任务")
+        
+        self.items = validated
+        return self.render()
+    
+    def render(self) -> str:
+        """渲染任务列表"""
+        if not self.items:
+            return "Error: 没有任务"
+        
+        lines = []
+        for todo in self.items:
+            marker = {
+                "pending": "[ ]",
+                "in_progress": "[>]",
+                "completed": "[x]",
+            }[todo["status"]]
+            lines.append(f"{marker} {todo['content']}")
+        
+        done = sum(todo["status"] == "completed" for todo in self.items)
+        lines.append(f"\n已完成: {done}/{len(self.items)}")
+        return "\n".join(lines)
+
+#注册ToolManager
+TODO = ToolManager()
+
+def run_todo_write(todos: list | str) ->  str:
+    try:
+        output = TODO.update(todos)
+    except ValueError as e:
+        return f"Error: {str(e)}"
+    print(f"更新任务列表: {output}")
+    return output
+
+
 # =============OPENAI TOOLS 定义============
 TOOLS = [
     {
@@ -177,6 +257,40 @@ TOOLS = [
                 "required": ["pattern"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_write",
+            "description": "创建并管理当前会话的任务列表",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "maxItems": 20,
+                        "description": "任务列表，每次传入完整列表（覆盖更新）",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "任务内容"
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                    "description": "任务状态"
+                                }
+                            },
+                            "required": ["content", "status"]
+                        }
+                    }
+                },
+                "required": ["todos"]
+            }
+        }
     }
 ]
 
@@ -186,6 +300,7 @@ TOOL_HANDLERS = {
     "edit": run_edit,
     "glob": run_glob,
     "bash": run_bash,
+    "todo_write": run_todo_write,
 }
 
 #=============Hook系统====================
@@ -271,6 +386,8 @@ register_hook("Stop", summary_hook)
 
 # ========== 核心Agent循环====================
 def agent_loop(messages: list):
+    rounds_since_todo = 0 # 多少轮没有使用todo_write工具
+
     while True:
         headers = {
             "Authorization": f"Bearer {API_KEY}",
@@ -300,6 +417,7 @@ def agent_loop(messages: list):
         
         # 处理tool_calls：用 TOOL_HANDLERS 统一分发
         tool_results = []
+        used_todo = False # 是否使用了todo_write工具
         for tool_call in msg["tool_calls"]:
             func = tool_call["function"]
             name = func["name"]
@@ -328,13 +446,26 @@ def agent_loop(messages: list):
             # 触发PostToolUse Hook
             trigger_hook("PostToolUse", name, output)
 
+            if name == "todo_write":
+                used_todo = True
+            
             tool_results.append({
                 "role": "tool",
                 "tool_call_id": tool_call["id"],
                 "content": output
             })
-
+        
         messages.extend(tool_results)
+        # 如果使用了todo_write工具，则重置轮数，否则增加轮数
+        rounds_since_todo = 0 if used_todo else rounds_since_todo + 1
+        # 连续 3 轮没用 todo_write：追加提醒（不要用 role=tool，没有对应 tool_call_id）
+        if rounds_since_todo >= 3:
+            messages.append({
+                "role": "user",
+                "content": "<reminder>请用 todo_write 更新你的任务列表。</reminder>",
+            })
+            rounds_since_todo = 0
+            print("\033[33m[reminder] 已提醒模型更新 todos\033[0m")
 
 # ========== 终端交互入口 ==========
 if __name__ == "__main__":
