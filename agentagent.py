@@ -1,5 +1,6 @@
 import os
 import subprocess
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -21,6 +22,17 @@ SYSTEM_PROMPT = f"你的Agent在 {os.getcwd()}运行，请根据系统提示完�
 
 
 #============Bash Tool 实现============
+def _decode_shell_output(data: bytes | None) -> str:
+    """Windows shell 多为 GBK，文件/部分工具为 UTF-8；按序尝试解码。"""
+    if not data:
+        return ""
+    for enc in ("utf-8", "gbk", "cp936", "latin-1"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
 def run_bash(command: str) -> str:
     dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
     if any(d in command for d in dangerous):
@@ -30,10 +42,8 @@ def run_bash(command: str) -> str:
         r = subprocess.run(
             command, shell=True, cwd=os.getcwd(),
             capture_output=True, timeout=120,
-            # Windows 默认 GBK，读 UTF-8 文件会解码失败；用 utf-8 + replace 更稳
-            encoding="utf-8", errors="replace",
         )
-        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        out = (_decode_shell_output(r.stdout) + _decode_shell_output(r.stderr)).strip()
         return out[:5000] if out else "命令执行成功，但未返回任何输出"
     except subprocess.TimeoutExpired:
         return "Error: 命令执行超时"
@@ -178,67 +188,86 @@ TOOL_HANDLERS = {
     "bash": run_bash,
 }
 
+#=============Hook系统====================
+HOOKS = {
+    "UserPromptSubmit": [],
+    "PreToolUse": [],
+    "PostToolUse": [],
+    "Stop": []
+}
+
+def register_hook(event: str, callback) -> None:
+    """注册Hook"""
+    HOOKS[event].append(callback)
+
+def trigger_hook(event: str, *args) -> Any | None:
+    """触发Hook"""
+    for callback in HOOKS[event]:
+        result = callback(* args)
+        if result is not None:
+            return result
+    return None
+
 #=========== 权限判断 ======================
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"]
+DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777", "C:\\Windows", "C:\\Users", "/etc/"]
 
-def check_deny_list(command: str) -> str | None:
-    """第一重判断：检测禁止操作直接拒绝"""
-    for pattern in DENY_LIST:
-        if pattern in command:
-            return f"Error: 危险操作被拒绝: {pattern}"
-    return None
-
-PERMISSION_RULES = [
-    {
-        "tools":["read", "write", "edit"],
-        "check": lambda args: not (WORKDIR /args.get("path", "")).resolve().is_relative_to(WORKDIR),
-        "message": "Error: 路径超出工作目录范围"
-    },
-    {
-        "tools": ["bash"],
-        "check": lambda args: any(
-            kw in args.get("command", "")
-            for kw in [
-                "rm ",
-                "> /etc/",
-                "chmod 777",
-                "C:\\Windows",
-                "C:\\Users",
-                "/etc/",
-            ]
-        ),
-        "message": "Error: 危险操作被拒绝",
-    },
-]
-
-def check_rules(tool_name: str, args: dict) -> str | None:
-    """第二重判断：检测工具权限"""
-    for rule in PERMISSION_RULES:
-        if tool_name in rule["tools"]:
-            if rule["check"](args):
-                return rule["message"]
-    return None
-
-def ask_user(tool_name: str, args: dict, reason: str) -> str | None:
-    """第三重判断：询问用户是否继续"""
-    print(f"\n\033[33m[permission] {reason}\033[0m")
-    print(f"工具: {tool_name}, 参数: {args}")
-    choice = input("是否继续？(y/n): ").strip().lower()
-    return "allow" if choice == "y" else "deny"
-
-def check_permission(name: str, args: dict) -> bool:
-    """管道：三道闸门依次检查"""
+def permission_hook(name: str, args: dict) -> str | None:
+    """PreToolUse: 三重判断：禁止列表、危险操作、询问用户"""
     if name == "bash":
-        reason = check_deny_list(args.get("command", ""))
-        if reason:
-            print(f"\n\033[31m[blocked] {reason}\033[0m")
-            return False
-    reason = check_rules(name, args)
-    if reason:
-        decision = ask_user(name, args, reason)
-        if decision == "deny":
-            return False
-    return True
+        for pattern in DENY_LIST:
+            if pattern in args.get("command", ""):
+                print(f"\n\033[31m[blocked] {pattern}\033[0m")
+                return "Error: 危险操作被拒绝"
+        for kw in DESTRUCTIVE:
+            if kw in args.get("command", ""):
+                print(f"\n\033[31m[blocked] {kw}\033[0m")
+                print(f"工具: {name}, 参数: {args}")
+                choice = input("是否继续？(y/n): ").strip().lower()
+                if choice not in ("y", "yes"):
+                    return "Error: 操作被拒绝"
+    
+    if name in ["read", "write", "edit"]:
+        check_path = (WORKDIR / args.get("path", "")).resolve().is_relative_to(WORKDIR)
+        if not check_path:
+            print(f"\n\033[31m[blocked] {args.get('path', '')}\033[0m")
+            print(f"工具: {name}, 参数: {args}")
+            choice = input("是否继续？(y/n): ").strip().lower()
+            if choice not in ("y", "yes"):
+                return "Error: 操作被拒绝"
+    
+    return None
+
+def log_hook(name: str, args: dict) -> None:
+    """PreToolUse: 记录每次工具使用日志"""
+    preview = str(list(args.values())[:2])[:50] # 参数预览,避免刷屏
+    print(f"\033[90m[HOOK]  工具: {name}, 参数: {preview} \033[0m")
+    return None
+
+def large_output_hook(name: str, result: str) -> None:
+    """PostToolUse: 处理大型输出"""
+    if len(result) > 5000:
+        print(f"\033[33m[HOOK]  工具: {name}, 输出过长: {len(result)} bytes\033[0m")
+    return None
+
+def context_inject_hook(query: str) -> None:
+    """UserPromptSubmit: 在用户输入前注入工作目录信息"""
+    print(f"\033[90m[HOOK] 当前工作目录: {WORKDIR}\033[0m")
+    return None
+
+def summary_hook(messages: list) -> None:
+    """Stop: 在Agent停止时打印总结"""
+    tool_count = sum(1 for m in messages if m.get("role") == "tool")
+    print(f"\033[32m[HOOK] 本次任务共使用{tool_count}个工具\033[0m")
+    return None
+
+# 注册Hook
+register_hook("UserPromptSubmit", context_inject_hook)
+register_hook("PreToolUse", permission_hook)
+register_hook("PreToolUse", log_hook)
+register_hook("PostToolUse", large_output_hook)
+register_hook("Stop", summary_hook)
+
 
 # ========== 核心Agent循环====================
 def agent_loop(messages: list):
@@ -266,7 +295,8 @@ def agent_loop(messages: list):
 
         # 如果不是tool_calls，则返回结果
         if not msg.get("tool_calls"):
-            return
+            trigger_hook("Stop", messages)
+            return None
         
         # 处理tool_calls：用 TOOL_HANDLERS 统一分发
         tool_results = []
@@ -275,12 +305,13 @@ def agent_loop(messages: list):
             name = func["name"]
             args = json.loads(func.get("arguments") or "{}")
 
-            # 权限检查（传入已解析的 name / args）
-            if not check_permission(name, args):
+            # 触发PreToolUse Hook
+            block = trigger_hook("PreToolUse", name, args)
+            if block:
                 tool_results.append({
                     "role": "tool",
                     "tool_call_id": tool_call["id"],
-                    "content": "Error: 操作被拒绝"
+                    "content": block
                 })
                 continue
 
@@ -293,6 +324,9 @@ def agent_loop(messages: list):
                 print (f"使用工具: {name} , 参数: {args}")
                 output = handler(**args)
                 print(f"工具{name}输出: {output}")
+
+            # 触发PostToolUse Hook
+            trigger_hook("PostToolUse", name, output)
 
             tool_results.append({
                 "role": "tool",
@@ -315,6 +349,10 @@ if __name__ == "__main__":
             break
         if query.lower() in ("exit", ""):
             break
+        
+        # 触发UserPromptSubmit Hook
+        trigger_hook("UserPromptSubmit", query)
+
 
         history.append({"role": "user", "content": query})
         agent_loop(history)
