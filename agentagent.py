@@ -25,6 +25,13 @@ SYSTEM_PROMPT = (
     "开始任何多步骤任务前，先用 todo_write 规划步骤；"
     "执行过程中及时更新任务状态（pending / in_progress / completed）。"
     "同一时间只能有一个 in_progress。"
+    "遇到需要专注探索或相对独立的子任务时，使用 task 交给子 Agent 执行，"
+    "你根据子 Agent 返回的总结继续决策；简单一步操作可直接使用基础工具。"
+)
+
+SUB_SYSTEM_PROMPT = (
+    f"你是一个在 {WORKDIR} 运行的编程 Agent。"
+    "完成交给你的任务,然后返回一个简洁的总结。"
 )
 
 #============Bash Tool 实现============
@@ -56,7 +63,7 @@ def run_bash(command: str) -> str:
     except (FileNotFoundError, OSError) as e:
         return f"Error: 命令执行失败\n错误信息: {str(e)}"
     
-#============Python Tool 实现============
+#============Python Base Tools 实现============
 def safe_path(path: str) -> Path:
     """检查路径是否在工作目录内"""
     path = (WORKDIR / path)
@@ -108,82 +115,8 @@ def run_glob(pattern:str) -> str:
     except Exception as e:
         return f"Error: 查找文件失败\n错误信息: {str(e)}"
 
-#============= 结构化状态，模型更新============
-class ToolManager:
-    def __init__(self):
-        self.items: list[dict] = []
-    
-    def update(self, todos: list | str) -> str:
-        """更新任务列表"""
-        if isinstance(todos, str):
-            try:
-                todos = json.loads(todos)
-            except json.JSONDecodeError:
-                try:
-                    todos = ast.literal_eval(todos)
-                except (SyntaxError, ValueError) as e:
-                    raise ValueError(" todos 应该是一个有效的JSON字符串或Python列表") from e
-        
-        if not isinstance(todos, list):
-            raise ValueError(" todos 应该是一个有效的JSON字符串或Python列表")
-        if len(todos) > 20:
-            raise ValueError(" todos 不能超过20个")
-        
-        # 逐条校验任务列表
-        validated = [] # 有效任务
-        in_progress_count = 0 # 进行中任务数
-        for index, todo in enumerate(todos):
-            if not isinstance(todo, dict):
-                raise ValueError(f"任务{index}应该是一个字典")
-            
-            content = str(todo.get("content", "")).strip() # 任务内容
-            status = str(todo.get("status", "pending")).strip().lower() # 任务状态
-            if not content:
-                raise ValueError(f"任务{index}内容不能为空")
-            if status not in ["pending", "in_progress", "completed"]:
-                raise ValueError(f"任务{index}状态必须为pending, in_progress, completed")
-            if status == "in_progress":
-                in_progress_count += 1
-            validated.append({"content": content, "status": status})
-        
-        if in_progress_count > 1:
-            raise ValueError("不能同时进行多个任务")
-        
-        self.items = validated
-        return self.render()
-    
-    def render(self) -> str:
-        """渲染任务列表"""
-        if not self.items:
-            return "Error: 没有任务"
-        
-        lines = []
-        for todo in self.items:
-            marker = {
-                "pending": "[ ]",
-                "in_progress": "[>]",
-                "completed": "[x]",
-            }[todo["status"]]
-            lines.append(f"{marker} {todo['content']}")
-        
-        done = sum(todo["status"] == "completed" for todo in self.items)
-        lines.append(f"\n已完成: {done}/{len(self.items)}")
-        return "\n".join(lines)
-
-#注册ToolManager
-TODO = ToolManager()
-
-def run_todo_write(todos: list | str) ->  str:
-    try:
-        output = TODO.update(todos)
-    except ValueError as e:
-        return f"Error: {str(e)}"
-    print(f"更新任务列表: {output}")
-    return output
-
-
-# =============OPENAI TOOLS 定义============
-TOOLS = [
+#============Base Tools Handler ================
+BASE_TOOLS = [
     {
         "type": "function",
         "function": {
@@ -258,51 +191,15 @@ TOOLS = [
             }
         }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "todo_write",
-            "description": "创建并管理当前会话的任务列表",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "todos": {
-                        "type": "array",
-                        "maxItems": 20,
-                        "description": "任务列表，每次传入完整列表（覆盖更新）",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "content": {
-                                    "type": "string",
-                                    "minLength": 1,
-                                    "description": "任务内容"
-                                },
-                                "status": {
-                                    "type": "string",
-                                    "enum": ["pending", "in_progress", "completed"],
-                                    "description": "任务状态"
-                                }
-                            },
-                            "required": ["content", "status"]
-                        }
-                    }
-                },
-                "required": ["todos"]
-            }
-        }
-    }
 ]
 
-TOOL_HANDLERS = {
+BASE_HANDLERS = {
     "read": run_read,
     "write": run_write,
     "edit": run_edit,
     "glob": run_glob,
     "bash": run_bash,
-    "todo_write": run_todo_write,
 }
-
 #=============Hook系统====================
 HOOKS = {
     "UserPromptSubmit": [],
@@ -383,6 +280,226 @@ register_hook("PreToolUse", log_hook)
 register_hook("PostToolUse", large_output_hook)
 register_hook("Stop", summary_hook)
 
+#============= 工具执行总流程 =============
+
+def execute_tool(name: str, args: dict, handlers: dict) -> str:
+    """封装执行工具的预处理、执行、后处理流程"""
+    blocked = trigger_hook("PreToolUse", name, args)
+    if blocked:
+        return str(blocked)
+
+    handler = handlers.get(name)
+    try:
+        output = handler(**args)
+    except Exception as e:
+        return f"Error: 工具{name}执行失败\n错误信息: {str(e)}"
+    
+    trigger_hook("PostToolUse", name, output)
+    return str(output)
+
+
+#=============带有新消息的SubAgent循环============
+SUB_TOOLS = list(BASE_TOOLS)
+SUB_HANDLERS = dict(BASE_HANDLERS)
+
+def extract_text(content: Any) -> str:
+    """从 assistant 的 content 提取最终文本（给父 Agent 的 tool_result）。
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    return str(content)
+
+def run_subagent(content: str) -> str:
+    """执行子Agent，返回最终文本"""
+    print("\n\033[35m[SubAgent] 开始执行任务\033[0m")
+    messages = [
+        {"role": "system", "content": SUB_SYSTEM_PROMPT},
+        {"role": "user", "content": content},
+    ]
+
+    for _ in range(30): # 最多执行30轮
+        headers = {
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model" : MODEL_NAME,
+            "messages": messages,
+            "tools": SUB_TOOLS,
+            "tool_choice": "auto",
+            "max_tokens": 5000
+        }
+
+        response = requests.post(END_POINT, headers = headers, json = payload, timeout = 180)
+        response.raise_for_status()
+        data = response.json()
+        choice = data["choices"][0]
+        msg = choice["message"]
+
+        messages.append(msg)
+
+        # 如果不是tool_calls，则返回结果
+        if not msg.get("tool_calls"):
+            trigger_hook("Stop", messages)
+            print(f"\n\033[35m[SubAgent] 任务执行完成\033[0m")
+            return extract_text(msg.get("content", ""))
+        
+        # 处理tool_calls：用 SUB_HANDLERS 统一分发
+        tool_results = []
+        for tool_call in msg["tool_calls"]:
+            func = tool_call["function"]
+            name = func["name"]
+            args = json.loads(func.get("arguments") or "{}")
+            
+            output = execute_tool(name, args, SUB_HANDLERS)
+
+
+            tool_results.append({
+                "role": "tool",
+                "tool_call_id": tool_call["id"],
+                "content": output
+            })
+        messages.extend(tool_results)
+    print(f"\n\033[35m[SubAgent] 任务执行完成\033[0m")
+    return "Sub Agent 执行30轮后，没有返回结果"
+        
+
+#============= 结构化状态，模型更新============
+class ToolManager:
+    """任务管理器"""
+    def __init__(self):
+        self.items: list[dict] = []
+    
+    def update(self, todos: list | str) -> str:
+        """更新任务列表"""
+        if isinstance(todos, str):
+            try:
+                todos = json.loads(todos)
+            except json.JSONDecodeError:
+                try:
+                    todos = ast.literal_eval(todos)
+                except (SyntaxError, ValueError) as e:
+                    raise ValueError(" todos 应该是一个有效的JSON字符串或Python列表") from e
+        
+        if not isinstance(todos, list):
+            raise ValueError(" todos 应该是一个有效的JSON字符串或Python列表")
+        if len(todos) > 20:
+            raise ValueError(" todos 不能超过20个")
+        
+        # 逐条校验任务列表
+        validated = [] # 有效任务
+        in_progress_count = 0 # 进行中任务数
+        for index, todo in enumerate(todos):
+            if not isinstance(todo, dict):
+                raise ValueError(f"任务{index}应该是一个字典")
+            
+            content = str(todo.get("content", "")).strip() # 任务内容
+            status = str(todo.get("status", "pending")).strip().lower() # 任务状态
+            if not content:
+                raise ValueError(f"任务{index}内容不能为空")
+            if status not in ["pending", "in_progress", "completed"]:
+                raise ValueError(f"任务{index}状态必须为pending, in_progress, completed")
+            if status == "in_progress":
+                in_progress_count += 1
+            validated.append({"content": content, "status": status})
+        
+        if in_progress_count > 1:
+            raise ValueError("不能同时进行多个任务")
+        
+        self.items = validated
+        return self.render()
+    
+    def render(self) -> str:
+        """渲染任务列表"""
+        if not self.items:
+            return "Error: 没有任务"
+        
+        lines = []
+        for todo in self.items:
+            marker = {
+                "pending": "[ ]",
+                "in_progress": "[>]",
+                "completed": "[x]",
+            }[todo["status"]]
+            lines.append(f"{marker} {todo['content']}")
+        
+        done = sum(todo["status"] == "completed" for todo in self.items)
+        lines.append(f"\n已完成: {done}/{len(self.items)}")
+        return "\n".join(lines)
+
+#注册ToolManager
+TODO = ToolManager()
+
+def run_todo_write(todos: list | str) ->  str:
+    try:
+        output = TODO.update(todos)
+    except ValueError as e:
+        return f"Error: {str(e)}"
+    print(f"更新任务列表: \n{output}")
+    return output
+
+
+# =============总 TOOLS 定义============
+TASK_TOOLS = [
+    *BASE_TOOLS,
+    {
+        "type": "function",
+        "function": {
+            "name": "task",
+            "description": "执行子Agent任务",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "要执行的任务内容"}
+                },
+                "required": ["content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_write",
+            "description": "创建并管理当前会话的任务列表",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "maxItems": 20,
+                        "description": "任务列表，每次传入完整列表（覆盖更新）",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "任务内容"
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                    "description": "任务状态"
+                                }
+                            },
+                            "required": ["content", "status"]
+                        }
+                    }
+                },
+                "required": ["todos"]
+            }
+        }
+    }
+]
+
+TOOL_HANDLERS = {
+    **BASE_HANDLERS,
+    "task": run_subagent,
+    "todo_write": run_todo_write,
+}
+
 
 # ========== 核心Agent循环====================
 def agent_loop(messages: list):
@@ -396,7 +513,7 @@ def agent_loop(messages: list):
         payload = {
             "model" : MODEL_NAME,
             "messages": messages,
-            "tools": TOOLS,
+            "tools": TASK_TOOLS,
             "tool_choice": "auto",
             "max_tokens": 5000
         }
@@ -423,28 +540,8 @@ def agent_loop(messages: list):
             name = func["name"]
             args = json.loads(func.get("arguments") or "{}")
 
-            # 触发PreToolUse Hook
-            block = trigger_hook("PreToolUse", name, args)
-            if block:
-                tool_results.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call["id"],
-                    "content": block
-                })
-                continue
-
             # 执行工具
-            handler = TOOL_HANDLERS.get(name)
-
-            if handler is None:
-                output = f"Error: 未找到工具{name}的处理器"
-            else:
-                print (f"使用工具: {name} , 参数: {args}")
-                output = handler(**args)
-                print(f"工具{name}输出: {output}")
-
-            # 触发PostToolUse Hook
-            trigger_hook("PostToolUse", name, output)
+            output = execute_tool(name, args, TOOL_HANDLERS)
 
             if name == "todo_write":
                 used_todo = True
