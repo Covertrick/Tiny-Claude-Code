@@ -9,6 +9,9 @@ __pycache__/
 .venv/
 venv/
 
+# Agent 运行时落盘
+.agent/
+
 # IDE / OS
 .idea/
 .vscode/
