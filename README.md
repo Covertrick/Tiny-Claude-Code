@@ -24,7 +24,7 @@ Tiny-Claude-Code/
 │   ├── code-review/
 │   ├── pdf/
 │   └── mcp-builder/
-├── agent/                       # Python 包（Windows 上与 Agent/ 是同一目录）
+├── agent/                       # Python 包
 │   ├── main.py                  # CLI 入口
 │   ├── config.py                # API / WORKDIR / RUNTIME_DIR
 │   ├── core/
