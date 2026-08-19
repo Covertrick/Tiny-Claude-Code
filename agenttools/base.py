@@ -5,7 +5,10 @@ from ..config import WORKDIR
 
 #============Python Base Tools 实现============
 def _decode_shell_output(data: bytes | None) -> str:
-    """Windows shell 多为 GBK，文件/部分工具为 UTF-8；按序尝试解码。"""
+    """把 shell 字节输出解码成字符串。
+
+    依次尝试 utf-8 / gbk / cp936 / latin-1，都失败则 utf-8 replace。
+    """
     if not data:
         return ""
     for enc in ("utf-8", "gbk", "cp936", "latin-1"):
@@ -16,6 +19,7 @@ def _decode_shell_output(data: bytes | None) -> str:
     return data.decode("utf-8", errors="replace")
 
 def run_bash(command: str) -> str:
+    """在 WORKDIR 下执行 shell 命令，返回合并后的 stdout/stderr（最多 5000 字）。"""
     dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
     if any(d in command for d in dangerous):
         return "Error: 危险操作被拒绝"
@@ -33,14 +37,14 @@ def run_bash(command: str) -> str:
         return f"Error: 命令执行失败\n错误信息: {str(e)}"
     
 def safe_path(path: str) -> Path:
-    """检查路径是否在工作目录内。"""
+    """把相对路径解析成 WORKDIR 内的绝对路径；越界则抛 ValueError。"""
     resolved = (WORKDIR / path).resolve()
     if not resolved.is_relative_to(WORKDIR):
         raise ValueError(f"路径{path}超出工作目录{WORKDIR}范围")
     return resolved
 
 def run_read(path:str, limit: int | None = None) -> str:
-    """读取文件内容，支持限制行数"""
+    """读取工作区内文件；limit 限制返回行数，超出部分用省略提示代替。"""
     try:
         lines = safe_path(path).read_text(encoding="utf-8").splitlines()
         if limit and limit < len(lines):
@@ -50,7 +54,7 @@ def run_read(path:str, limit: int | None = None) -> str:
         return f"Error: 读取文件失败\n错误信息: {str(e)}"
 
 def run_write(path: str, content: str) -> str:
-    """写入文件内容"""
+    """覆盖写入工作区内文件；父目录不存在时自动创建。"""
     try:
         file_path = safe_path(path)
         file_path.parent.mkdir(parents = True, exist_ok = True)
@@ -60,7 +64,7 @@ def run_write(path: str, content: str) -> str:
         return f"Error: 写入文件失败\n错误信息: {str(e)}"
 
 def run_edit(path: str, old_text: str, new_text: str) -> str:
-    """编辑文件内容"""
+    """在文件中把 old_text 替换为 new_text（仅第一次匹配）。"""
     try:
         file_path = safe_path(path)
         text = file_path.read_text(encoding = "utf-8")
@@ -72,7 +76,7 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
         return f"Error: 编辑文件失败\n错误信息: {str(e)}"
 
 def run_glob(pattern:str) -> str:
-    """查找文件"""
+    """在 WORKDIR 下按 glob 找文件，只返回仍落在工作区内的相对路径。"""
     import glob as g
     try:
         results = []

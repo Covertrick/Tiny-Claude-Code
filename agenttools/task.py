@@ -12,7 +12,7 @@ SUB_HANDLERS = dict(BASE_HANDLERS)
 
 
 def extract_text(content: Any) -> str:
-    """从 assistant 的 content 提取最终文本（给父 Agent 的 tool_result）。"""
+    """把子 Agent 最后一轮 assistant content 收成纯文本，交给父 Agent。"""
     if content is None:
         return ""
     if isinstance(content, str):
@@ -21,7 +21,10 @@ def extract_text(content: Any) -> str:
 
 
 def run_subagent(content: str) -> str:
-    """执行子Agent，返回最终文本"""
+    """task 工具：用独立 messages + 基础工具跑子循环，最多 30 轮。
+
+    只返回最终文字总结；子循环没有 task / todo_write，避免套娃。
+    """
     print("\n\033[35m[SubAgent] 开始执行任务\033[0m")
     messages = [
         {"role": "system", "content": SUB_SYSTEM_PROMPT},

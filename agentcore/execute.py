@@ -2,7 +2,10 @@ from ..hooks import trigger_hook
 
 
 def execute_tool(name: str, args: dict, handlers: dict) -> str:
-    """封装执行工具的预处理、执行、后处理流程。"""
+    """执行一次工具：PreToolUse → handler → PostToolUse。
+
+    PreToolUse 若返回非 None，视为拦截，直接把该结果当输出，不调用 handler。
+    """
     blocked = trigger_hook("PreToolUse", name, args)
     if blocked:
         return str(blocked)

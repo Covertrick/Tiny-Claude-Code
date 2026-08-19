@@ -6,10 +6,26 @@ from ..compaction import COMPACTOR, MAX_REACTIVE_RETRIES, is_context_overflow
 from ..core.execute import execute_tool
 from ..core.llm import chat
 from ..hooks import trigger_hook
+from ..memory import build_system, consolidate_memories, extract_memories, load_memories
 from ..tools import TASK_TOOLS, TOOL_HANDLERS
 
 
+def _update_system_message(messages: list) -> None:
+    """按当前对话召回记忆，刷新 messages 首条 system。"""
+    system = build_system(load_memories(messages))
+    if messages and messages[0].get("role") == "system":
+        messages[0]["content"] = system
+    else:
+        messages.insert(0, {"role": "system", "content": system})
+
+
 def agent_loop(messages: list, active_request: str = ""):
+    """父 Agent 主循环：召回记忆 → 压缩 → 调模型 → 执行工具，直到模型不再 tool_calls。
+
+    messages 就地修改。每轮开始时按对话召回记忆并更新 system；
+    正常结束时尝试 extract_memories，若有新记忆则触发 consolidate_memories。
+    """
+    _update_system_message(messages)
     rounds_since_todo = 0
     reactive_retries = 0
 
@@ -30,6 +46,8 @@ def agent_loop(messages: list, active_request: str = ""):
 
         if not msg.get("tool_calls"):
             trigger_hook("Stop", messages)
+            if extract_memories(messages):
+                consolidate_memories()
             return None
 
         tool_results = []

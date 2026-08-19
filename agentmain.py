@@ -1,14 +1,15 @@
 from .config import MODEL_NAME
 from .core.loop import agent_loop
 from .hooks import trigger_hook
-from .skill_load import SYSTEM_PROMPT
+from .memory import build_system
 
 
 def main() -> None:
+    """交互式 CLI：读入用户输入，驱动 agent_loop，打印最终回复。"""
     print(f"Agent正在运行，模型: {MODEL_NAME}")
-    print("输入任务，回车发送，输入exit退出。 \n")
+    print("输入任务，回车发送，输入 exit 退出。\n")
 
-    history = [{"role": "system", "content": SYSTEM_PROMPT}]
+    history = [{"role": "system", "content": build_system()}]
     while True:
         try:
             query = input("\033[36ms01 >> \033[0m")

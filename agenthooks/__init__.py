@@ -1,3 +1,5 @@
+"""Hook 总线：注册 / 触发生命周期回调。"""
+
 from typing import Any
 
 HOOKS = {
@@ -9,12 +11,15 @@ HOOKS = {
 
 
 def register_hook(event: str, callback) -> None:
-    """注册Hook"""
+    """把 callback 挂到指定事件（UserPromptSubmit / PreToolUse / PostToolUse / Stop）。"""
     HOOKS[event].append(callback)
 
 
 def trigger_hook(event: str, *args) -> Any | None:
-    """触发Hook"""
+    """按注册顺序触发事件上的 hook。
+
+    某个 callback 返回非 None 时短路，把该值交给调用方（常用于拦截工具）。
+    """
     for callback in HOOKS[event]:
         result = callback(*args)
         if result is not None:
@@ -23,6 +28,7 @@ def trigger_hook(event: str, *args) -> Any | None:
 
 
 def _register_defaults() -> None:
+    """注册内置权限、日志、大输出警告与 Stop 统计。"""
     from .permission import (
         context_inject_hook,
         large_output_hook,

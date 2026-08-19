@@ -9,8 +9,10 @@ __pycache__/
 .venv/
 venv/
 
-# Agent 运行时落盘
+# Agent 运行时落盘（勿提交）
 .agent/
+.memory/
+**/.runtime/
 
 # IDE / OS
 .idea/

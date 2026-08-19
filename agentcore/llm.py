@@ -9,7 +9,10 @@ def chat(
     max_tokens: int = 5000,
     timeout: int = 180,
 ) -> dict:
-    """调用 OpenAI 兼容 chat/completions，返回 assistant message。"""
+    """请求 OpenAI 兼容 chat/completions，返回 choices[0].message。
+
+    tools 为 None 时不带工具 schema；HTTP 错误由 requests 抛出。
+    """
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",

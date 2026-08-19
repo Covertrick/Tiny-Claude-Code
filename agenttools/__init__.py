@@ -1,3 +1,5 @@
+"""父 Agent 工具表：BASE_TOOLS 加上 task / todo_write / load_skill。"""
+
 from .base import BASE_HANDLERS, BASE_TOOLS
 from .skill import load_skill
 from .task import run_subagent

@@ -2,13 +2,16 @@ import ast
 import json
 
 class ToolManager:
-    """任务管理器"""
+    """会话内待办列表：校验、覆盖更新，并渲染成给模型看的文本。"""
 
     def __init__(self):
         self.items: list[dict] = []
 
     def update(self, todos: list | str) -> str:
-        """更新任务列表"""
+        """用完整列表覆盖当前 todos，返回 render() 文本。
+
+        支持 list，或 JSON / Python 字面量字符串。同时最多一个 in_progress，最多 20 条。
+        """
         if isinstance(todos, str):
             try:
                 todos = json.loads(todos)
@@ -46,7 +49,7 @@ class ToolManager:
         return self.render()
 
     def render(self) -> str:
-        """渲染任务列表"""
+        """把待办渲染成 [ ] / [>] / [x] 列表文本。"""
         if not self.items:
             return "Error: 没有任务"
 
@@ -68,6 +71,7 @@ TODO = ToolManager()
 
 
 def run_todo_write(todos: list | str) -> str:
+    """todo_write 工具入口：校验失败时返回 Error 字符串，不抛给模型循环。"""
     try:
         output = TODO.update(todos)
     except ValueError as e:

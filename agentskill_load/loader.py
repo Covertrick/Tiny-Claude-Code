@@ -5,7 +5,7 @@ from ..config import SKILLS_DIR, WORKDIR
 
 
 class SkillLoader:
-    """技能加载器"""
+    """扫描 skills/*/SKILL.md，提供目录摘要与按名加载全文。"""
 
     def __init__(self, skills_dir: Path):
         self.skills_dir = skills_dir
@@ -14,7 +14,10 @@ class SkillLoader:
 
     @staticmethod
     def parse_frontmatter(text: str) -> tuple[dict, str]:
-        """解析 YAML frontmatter，返回 (元数据字典, 正文)，如果解析失败则返回空字典和原始文本"""
+        """按行拆 YAML frontmatter，兼容 \\r\\n。
+
+        失败或没有 frontmatter 时返回 ({}, 原文)。
+        """
         lines = text.splitlines(keepends=True)
         if not lines or lines[0].rstrip("\r\n") != "---":
             return {}, text
@@ -38,7 +41,7 @@ class SkillLoader:
         return metadata, body
 
     def scan(self) -> None:
-        """扫描技能目录，加载所有技能"""
+        """重新扫描技能目录，刷新 self.skills。"""
         self.skills.clear()
         if not self.skills_dir.exists():
             return None
@@ -64,7 +67,7 @@ class SkillLoader:
             }
 
     def catalog(self) -> str:
-        """返回技能目录"""
+        """生成「- name: description」目录文本，供系统提示使用。"""
         if not self.skills:
             return "Error: 没有找到技能"
         return "\n".join(
@@ -73,7 +76,7 @@ class SkillLoader:
         )
 
     def load(self, name: str) -> str:
-        """加载技能"""
+        """按名称返回完整 SKILL.md；未知名称时列出可用技能。"""
         skill = self.skills.get(name)
         if skill:
             return skill["content"]
@@ -85,7 +88,7 @@ SKILL_LOADER = SkillLoader(SKILLS_DIR)
 
 
 def build_system_prompt() -> str:
-    """构建系统提示词"""
+    """拼父 Agent 系统提示：工作目录约定、todo/task 用法、技能目录。"""
     return (
         f"你是一个在 {WORKDIR} 运行的编程 Agent。"
         "开始任何多步骤任务前，先用 todo_write 规划步骤；"
