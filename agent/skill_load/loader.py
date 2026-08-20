@@ -88,16 +88,20 @@ SKILL_LOADER = SkillLoader(SKILLS_DIR)
 
 
 def build_system_prompt() -> str:
-    """拼父 Agent 系统提示：工作目录约定、todo/task 用法、技能目录。"""
+    """拼父 Agent 系统提示：工作目录、todo / 持久化任务 / SubAgent / 技能。"""
     return (
         f"你是一个在 {WORKDIR} 运行的编程 Agent。"
-        "开始任何多步骤任务前，先用 todo_write 规划步骤；"
-        "执行过程中及时更新任务状态（pending / in_progress / completed）。"
+        "简单多步骤会话内规划用 todo_write（内存列表，覆盖更新）；"
         "同一时间只能有一个 in_progress。"
+        "若步骤之间有先后依赖、需要持久化跟踪，使用任务系统："
+        "先 create_task 建齐所有节点，根据返回的 task_xxxxxxxx ID，"
+        "再用 update_task 的 addBlockedBy 添加依赖；"
+        "执行时 claim_task → 干活 → complete_task；可用 list_tasks / get_task 查看。"
+        "不要编造任务 ID，必须使用 create_task 返回的精确 ID。"
         "遇到需要专注探索或相对独立的子任务时，使用 task 交给子 Agent 执行，"
         "你根据子 Agent 返回的总结继续决策；简单一步操作可直接使用基础工具。"
         f"技能可用:\n{SKILL_LOADER.catalog()}\n\n"
-        "使用 load_skill 加载技能时，使用 load_skill 读取完整的技能说明。"
+        "需要完整技能说明时，用 load_skill 按名称加载。"
     )
 
 

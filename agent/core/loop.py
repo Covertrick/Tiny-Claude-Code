@@ -51,14 +51,20 @@ def agent_loop(messages: list, active_request: str = ""):
             return None
 
         tool_results = []
-        used_todo = False
+        used_planning = False
         for tool_call in msg["tool_calls"]:
             func = tool_call["function"]
             name = func["name"]
             args = json.loads(func.get("arguments") or "{}")
             output = execute_tool(name, args, TOOL_HANDLERS)
-            if name == "todo_write":
-                used_todo = True
+            if name in (
+                "todo_write",
+                "create_task",
+                "update_task",
+                "claim_task",
+                "complete_task",
+            ):
+                used_planning = True
             tool_results.append({
                 "role": "tool",
                 "tool_call_id": tool_call["id"],
@@ -66,11 +72,14 @@ def agent_loop(messages: list, active_request: str = ""):
             })
 
         messages.extend(tool_results)
-        rounds_since_todo = 0 if used_todo else rounds_since_todo + 1
+        rounds_since_todo = 0 if used_planning else rounds_since_todo + 1
         if rounds_since_todo >= 3:
             messages.append({
                 "role": "user",
-                "content": "<reminder>请用 todo_write 更新你的任务列表。</reminder>",
+                "content": (
+                    "<reminder>请用 todo_write 或 "
+                    "create_task/claim_task/complete_task 更新任务进度。</reminder>"
+                ),
             })
             rounds_since_todo = 0
-            print("\033[33m[reminder] 已提醒模型更新 todos\033[0m")
+            print("\033[33m[reminder] 已提醒模型更新任务进度\033[0m")

@@ -17,3 +17,4 @@ WORKDIR = Path.cwd().resolve()
 SKILLS_DIR = WORKDIR / "skills"
 # 运行时落盘（压缩归档、工具大输出、记忆），跟源码包放一起
 RUNTIME_DIR = _PKG_DIR / ".runtime"
+TASKS_DIR = RUNTIME_DIR / "tasks"
