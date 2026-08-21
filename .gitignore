@@ -14,7 +14,7 @@ venv/
 .memory/
 **/.runtime/
 
-# 评测报告
+# 评测：保留本地详细报告，入库汇总见 evals/SUMMARY.md
 evals/reports/
 
 # IDE / OS

@@ -37,7 +37,8 @@ python -m evals.runner --mode online --categories A,E --token-budget 50000
 python -m evals.runner --mode online --ids A01,E05 --token-budget 20000
 ```
 
-报告输出：`evals/reports/report_*.md` + `.json`
+报告输出：`evals/reports/report_*.md` + `.json`（本地，gitignore）。  
+入库汇总：[`evals/SUMMARY.md`](SUMMARY.md)。
 
 ## 题目规模
 

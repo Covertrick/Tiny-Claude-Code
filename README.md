@@ -3,7 +3,7 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![OpenAI-Compatible](https://img.shields.io/badge/API-OpenAI--Compatible-green.svg)](https://platform.openai.com/docs/api-reference)
 [![License](https://img.shields.io/badge/license-see%20repo-lightgrey.svg)](#license)
-[![Eval](https://img.shields.io/badge/eval-48%2F48%20pass-brightgreen.svg)](evals/reports/SUMMARY_20260821.md)
+[![Eval](https://img.shields.io/badge/eval-48%2F48%20pass-brightgreen.svg)](evals/SUMMARY.md)
 
 **纯原生 Python 实现的轻量级 Coding Agent Harness**：不依赖 LangChain / LlamaIndex 等编排框架，将工具分发、权限 Hooks、上下文压缩、长期记忆、持久化任务图、后台并发与 MCP 动态工具，统一挂在**同一个主循环**上。
 
@@ -90,7 +90,7 @@ User Input
 | Online（qwen3.7-plus） | **31/31** | ≈ 33.1 万 |
 | **合计** | **48/48** | ≈ 33.1 万 |
 
-定位为 **Harness 控制流与边界的集成断言**，而非 SWE-bench / MBPP 榜单。详见 [`evals/`](evals/) 与 [`evals/reports/SUMMARY_20260821.md`](evals/reports/SUMMARY_20260821.md)。
+定位为 **Harness 控制流与边界的集成断言**，而非 SWE-bench / MBPP 榜单。详见 [`evals/`](evals/) 与 [`evals/SUMMARY.md`](evals/SUMMARY.md)。
 
 ---
 
