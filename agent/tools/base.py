@@ -1,9 +1,17 @@
-import os
+import atexit
 import subprocess
+import threading
 from pathlib import Path
+
 from ..config import WORKDIR
 
 #============Python Base Tools 实现============
+
+# 登记仍在跑的 Popen，供进程退出时统一杀掉（正常结束会在 finally 里 discard）
+_shell_processes: set[subprocess.Popen] = set()
+_shell_process_lock = threading.RLock()
+
+
 def _decode_shell_output(data: bytes | None) -> str:
     """把 shell 字节输出解码成字符串。
 
@@ -18,24 +26,87 @@ def _decode_shell_output(data: bytes | None) -> str:
             continue
     return data.decode("utf-8", errors="replace")
 
-def run_bash(command: str) -> str:
-    """在 WORKDIR 下执行 shell 命令，返回合并后的 stdout/stderr（最多 5000 字）。"""
+
+def _stop_process(process: subprocess.Popen) -> None:
+    """结束子进程：先 terminate，不行再 kill（Win11 / 跨平台都够用）。"""
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        try:
+            process.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+    except (ProcessLookupError, OSError):
+        pass
+
+
+def _stop_all_shell_processes() -> None:
+    """进程退出时清掉还没结束的 shell 子进程。"""
+    with _shell_process_lock:
+        processes = list(_shell_processes)
+    for process in processes:
+        _stop_process(process)
+
+
+atexit.register(_stop_all_shell_processes)
+
+
+def run_bash_process(command: str) -> tuple[str, int | None]:
+    """在 WORKDIR 下启动 shell 子进程并等待结束；返回 (合并输出, exit_code)。
+
+    Windows 下 shell=True 会走 cmd.exe，命令写法用 ping / dir 等即可，不必装 Linux。
+    """
+    process = None
+    try:
+        process = subprocess.Popen(
+            command,
+            shell=True,
+            cwd=str(WORKDIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        with _shell_process_lock:
+            _shell_processes.add(process)
+        stdout, stderr = process.communicate(timeout=120)
+        out = (_decode_shell_output(stdout) + _decode_shell_output(stderr)).strip()
+        return (out[:5000] if out else "命令执行成功，但未返回任何输出"), process.returncode
+    except subprocess.TimeoutExpired:
+        if process is not None:
+            _stop_process(process)
+        return "Error: 命令执行超时", None
+    except Exception as e:
+        return f"Error: 命令执行失败\n错误信息: {e}", None
+    finally:
+        if process is not None:
+            _stop_process(process)
+            try:
+                process.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                pass
+            with _shell_process_lock:
+                _shell_processes.discard(process)
+
+
+def format_bash_result(output: str, exit_code: int | None) -> str:
+    """按退出码格式化 bash 输出。"""
+    if exit_code == 0:
+        return output if output else "命令执行成功，但未返回任何输出"
+    if exit_code is None:
+        return output if output.startswith("Error:") else f"Error: {output}"
+    return f"Error: 命令退出码 {exit_code}\n{output[:5000]}"
+
+
+def run_bash(command: str, run_in_background: bool = False) -> str:
+    """在 WORKDIR 下同步执行 shell（忽略 run_in_background，后台由 execute 分发）。"""
+    _ = run_in_background
     dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
     if any(d in command for d in dangerous):
         return "Error: 危险操作被拒绝"
-    
-    try:
-        r = subprocess.run(
-            command, shell=True, cwd=os.getcwd(),
-            capture_output=True, timeout=120,
-        )
-        out = (_decode_shell_output(r.stdout) + _decode_shell_output(r.stderr)).strip()
-        return out[:5000] if out else "命令执行成功，但未返回任何输出"
-    except subprocess.TimeoutExpired:
-        return "Error: 命令执行超时"
-    except (FileNotFoundError, OSError) as e:
-        return f"Error: 命令执行失败\n错误信息: {str(e)}"
-    
+    output, exit_code = run_bash_process(command)
+    return format_bash_result(output, exit_code)
+
+
 def safe_path(path: str) -> Path:
     """把相对路径解析成 WORKDIR 内的绝对路径；越界则抛 ValueError。"""
     resolved = (WORKDIR / path).resolve()
@@ -93,15 +164,26 @@ BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "在本地执行shell命令",
+            "description": (
+                "在本地执行 shell 命令。"
+                "耗时且可独立运行的命令可设 run_in_background=true，"
+                "立即返回任务 id，结果在后续轮次以 task_notification 注入。"
+            ),
             "parameters": {
                 "type": "object",
-                "properties" :{
-                    "command": {"type": "string", "description": "要执行的shell命令"}
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "要执行的 shell 命令",
+                    },
+                    "run_in_background": {
+                        "type": "boolean",
+                        "description": "是否在后台执行（仅 bash）",
+                    },
                 },
-                "required": ["command"]
-            }
-        }
+                "required": ["command"],
+            },
+        },
     },
     {
         "type": "function",

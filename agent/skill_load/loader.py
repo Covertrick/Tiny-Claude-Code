@@ -98,6 +98,8 @@ def build_system_prompt() -> str:
         "再用 update_task 的 addBlockedBy 添加依赖；"
         "执行时 claim_task → 干活 → complete_task；可用 list_tasks / get_task 查看。"
         "不要编造任务 ID，必须使用 create_task 返回的精确 ID。"
+        "耗时且可独立运行的 bash 可设 run_in_background=true，"
+        "结果会在后续轮次以 task_notification 注入。"
         "遇到需要专注探索或相对独立的子任务时，使用 task 交给子 Agent 执行，"
         "你根据子 Agent 返回的总结继续决策；简单一步操作可直接使用基础工具。"
         f"技能可用:\n{SKILL_LOADER.catalog()}\n\n"
