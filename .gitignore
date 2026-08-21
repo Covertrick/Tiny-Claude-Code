@@ -14,6 +14,9 @@ venv/
 .memory/
 **/.runtime/
 
+# 评测报告
+evals/reports/
+
 # IDE / OS
 .idea/
 .vscode/

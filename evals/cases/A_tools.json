@@ -1,0 +1,140 @@
+[
+  {
+    "id": "A01",
+    "category": "A",
+    "mode": "online",
+    "est_tokens": 2500,
+    "prompt": "只用 write 工具创建文件 eval_a01.txt，内容必须一字不差是：hello-a01。不要写别的文件。完成后简短确认。",
+    "expect": {
+      "tools_any": ["write"],
+      "file_equals": {"eval_a01.txt": "hello-a01"}
+    }
+  },
+  {
+    "id": "A02",
+    "category": "A",
+    "mode": "online",
+    "est_tokens": 2500,
+    "setup_files": {"eval_a02.txt": "old"},
+    "prompt": "用 edit 把 eval_a02.txt 里的 old 改成 new-a02。只改这一处。",
+    "expect": {
+      "tools_any": ["edit"],
+      "file_equals": {"eval_a02.txt": "new-a02"}
+    }
+  },
+  {
+    "id": "A03",
+    "category": "A",
+    "mode": "online",
+    "est_tokens": 2500,
+    "setup_files": {"eval_a03.txt": "line1\nline2\n"},
+    "prompt": "用 read 读取 eval_a03.txt，在最终回复里原样写出文件全部内容。",
+    "expect": {
+      "tools_any": ["read"],
+      "output_contains": ["line1", "line2"]
+    }
+  },
+  {
+    "id": "A04",
+    "category": "A",
+    "mode": "online",
+    "est_tokens": 2500,
+    "setup_files": {"pkg/x.py": "print(1)\n", "pkg/y.md": "# y\n"},
+    "prompt": "用 glob 查找 **/*.py，最终回复里必须出现 pkg/x.py。",
+    "expect": {
+      "tools_any": ["glob"],
+      "output_contains": ["pkg/x.py"]
+    }
+  },
+  {
+    "id": "A05",
+    "category": "A",
+    "mode": "online",
+    "est_tokens": 2500,
+    "prompt": "用 bash 执行：echo EVAL_A05_OK ，并在最终回复中包含命令输出里的 EVAL_A05_OK。",
+    "expect": {
+      "tools_any": ["bash"],
+      "output_contains": ["EVAL_A05_OK"]
+    }
+  },
+  {
+    "id": "A06",
+    "category": "A",
+    "mode": "online",
+    "est_tokens": 3000,
+    "prompt": "先 write 创建 notes.txt 内容为 alpha，再用 edit 把 alpha 改成 beta。不要做其他事。",
+    "expect": {
+      "tools_all": ["write", "edit"],
+      "file_equals": {"notes.txt": "beta"}
+    }
+  },
+  {
+    "id": "A07",
+    "category": "A",
+    "mode": "online",
+    "est_tokens": 2500,
+    "prompt": "用 write 创建 nested/dir/a07.txt，内容为 deep。",
+    "expect": {
+      "tools_any": ["write"],
+      "file_equals": {"nested/dir/a07.txt": "deep"}
+    }
+  },
+  {
+    "id": "A08",
+    "category": "A",
+    "mode": "online",
+    "est_tokens": 2500,
+    "setup_files": {"keep.txt": "stay"},
+    "prompt": "用 read 读 keep.txt。不要调用 write 或 edit。",
+    "expect": {
+      "tools_any": ["read"],
+      "tools_none": ["write", "edit"],
+      "file_equals": {"keep.txt": "stay"}
+    }
+  },
+  {
+    "id": "A09",
+    "category": "A",
+    "mode": "online",
+    "est_tokens": 2500,
+    "prompt": "用 bash 执行：echo A09_MARKER ，最终回复必须包含 A09_MARKER。",
+    "expect": {
+      "tools_any": ["bash"],
+      "output_contains": ["A09_MARKER"]
+    }
+  },
+  {
+    "id": "A10",
+    "category": "A",
+    "mode": "online",
+    "est_tokens": 2500,
+    "setup_files": {"data.csv": "a,b\n1,2\n"},
+    "prompt": "read data.csv，最终回复包含 1,2。",
+    "expect": {
+      "tools_any": ["read"],
+      "output_contains": ["1,2"]
+    }
+  },
+  {
+    "id": "A11",
+    "category": "A",
+    "mode": "online",
+    "est_tokens": 2500,
+    "prompt": "write 文件 hello_world.py，内容只有一行：print('hw')",
+    "expect": {
+      "tools_any": ["write"],
+      "file_contains": {"hello_world.py": "print('hw')"}
+    }
+  },
+  {
+    "id": "A12",
+    "category": "A",
+    "mode": "online",
+    "est_tokens": 3000,
+    "prompt": "write 创建 t.txt 内容为 one；再用 bash 执行 type t.txt（Windows），确保工具结果里能看到 one。",
+    "expect": {
+      "tools_all": ["write", "bash"],
+      "output_contains": ["one"]
+    }
+  }
+]

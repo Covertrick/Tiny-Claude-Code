@@ -1,0 +1,47 @@
+[
+  {
+    "id": "D03",
+    "category": "D",
+    "mode": "online",
+    "est_tokens": 3000,
+    "prompt": "用 bash 执行 ping -n 3 127.0.0.1，必须设置 run_in_background=true。启动后立刻用 read 读取（若无文件可先 write 一个 d03.txt 内容 ok 再 read）。不要同步等待 ping。",
+    "expect": {
+      "tools_any": ["bash"],
+      "output_contains": ["后台", "bg_"],
+      "max_elapsed_sec": 90
+    }
+  },
+  {
+    "id": "D04",
+    "category": "D",
+    "mode": "online",
+    "est_tokens": 3500,
+    "prompt": "后台 bash：ping -n 4 127.0.0.1（run_in_background=true）。然后继续对话直到你收到 task_notification 或能总结 ping 结果。最终回复包含 task_notification 或 TTL 或 Ping 字样。",
+    "expect": {
+      "tools_any": ["bash"],
+      "output_contains": ["task_notification"]
+    }
+  },
+  {
+    "id": "D05",
+    "category": "D",
+    "mode": "online",
+    "est_tokens": 2500,
+    "prompt": "前台 bash（不要后台）执行 echo D05_FG，最终回复含 D05_FG。",
+    "expect": {
+      "tools_any": ["bash"],
+      "output_contains": ["D05_FG"]
+    }
+  },
+  {
+    "id": "D06",
+    "category": "D",
+    "mode": "online",
+    "est_tokens": 3000,
+    "prompt": "后台运行 ping -n 2 127.0.0.1（run_in_background=true），工具返回里应出现「已启动」或 bg_。",
+    "expect": {
+      "tools_any": ["bash"],
+      "output_contains": ["bg_"]
+    }
+  }
+]

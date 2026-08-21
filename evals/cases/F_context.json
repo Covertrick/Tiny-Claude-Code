@@ -1,0 +1,25 @@
+[
+  {
+    "id": "F01",
+    "category": "F",
+    "mode": "online",
+    "est_tokens": 20000,
+    "prompt": "先用 write 创建 big_f01.txt，写入大约 80 行，每行格式为 LINE_i_VALUE（i 从 1 到 80）。再用 read 读取该文件（可分段）。最后用 edit 把 LINE_1_VALUE 改成 LINE_1_FIXED，并确认文件首行已变。保持步骤清晰。",
+    "expect": {
+      "tools_all": ["write", "read", "edit"],
+      "file_contains": {"big_f01.txt": "LINE_1_FIXED"}
+    }
+  },
+  {
+    "id": "F02",
+    "category": "F",
+    "mode": "online",
+    "est_tokens": 20000,
+    "prompt": "连续完成：1) write a.txt=A 2) write b.txt=B 3) write c.txt=C 4) read 三者 5) 用 bash echo F02_DONE。最终回复包含 F02_DONE，且三个文件内容正确。",
+    "expect": {
+      "tools_any": ["write", "read", "bash"],
+      "file_equals": {"a.txt": "A", "b.txt": "B", "c.txt": "C"},
+      "output_contains": ["F02_DONE"]
+    }
+  }
+]

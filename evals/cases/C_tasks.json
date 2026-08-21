@@ -1,0 +1,65 @@
+[
+  {
+    "id": "C05",
+    "category": "C",
+    "mode": "online",
+    "est_tokens": 4000,
+    "prompt": "用任务系统：create_task 主题「C05-A」，再 create_task「C05-B」。用 update_task 让 B 依赖 A（addBlockedBy）。然后 claim_task A → complete_task A → claim_task B → complete_task B。最后 list_tasks，确认两个都是 completed。不要编造 ID。",
+    "expect": {
+      "tools_all": ["create_task", "update_task", "claim_task", "complete_task", "list_tasks"]
+    }
+  },
+  {
+    "id": "C06",
+    "category": "C",
+    "mode": "online",
+    "est_tokens": 3500,
+    "prompt": "create_task「C06-only」，claim 它，complete 它，再用 get_task 查看，最终回复包含 completed。",
+    "expect": {
+      "tools_all": ["create_task", "claim_task", "complete_task", "get_task"],
+      "output_contains": ["completed"]
+    }
+  },
+  {
+    "id": "C07",
+    "category": "C",
+    "mode": "online",
+    "est_tokens": 4000,
+    "prompt": "创建任务 C07-1 与 C07-2，让 2 依赖 1。在未完成 1 时尝试 claim 2，应失败；最终回复包含「阻塞」或 blocked 或无法认领等字样。不要强行完成错误路径。",
+    "expect": {
+      "tools_any": ["create_task", "claim_task"],
+      "output_contains": ["阻塞"]
+    }
+  },
+  {
+    "id": "C08",
+    "category": "C",
+    "mode": "online",
+    "est_tokens": 3000,
+    "prompt": "create_task「C08」，list_tasks，最终回复里要出现 C08。",
+    "expect": {
+      "tools_all": ["create_task", "list_tasks"],
+      "output_contains": ["C08"]
+    }
+  },
+  {
+    "id": "C09",
+    "category": "C",
+    "mode": "online",
+    "est_tokens": 3500,
+    "prompt": "只使用 todo_write 创建两个待办：1) 读文件 pending 2) 写文件 pending。同一时间只能一个 in_progress。最终确认已写入。",
+    "expect": {
+      "tools_any": ["todo_write"]
+    }
+  },
+  {
+    "id": "C10",
+    "category": "C",
+    "mode": "online",
+    "est_tokens": 4000,
+    "prompt": "create_task「上游」、create_task「下游」，update_task 让下游 blockedBy 上游。claim+complete 上游后 list_tasks，说明下游已可认领。",
+    "expect": {
+      "tools_all": ["create_task", "update_task", "claim_task", "complete_task", "list_tasks"]
+    }
+  }
+]

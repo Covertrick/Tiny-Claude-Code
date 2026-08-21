@@ -1,0 +1,47 @@
+[
+  {
+    "id": "E05",
+    "category": "E",
+    "mode": "online",
+    "est_tokens": 3000,
+    "prompt": "connect_mcp 连接 docs，然后调用 mcp__docs__search，query 为 agent loop。最终回复包含 docs 搜索结果要点。",
+    "expect": {
+      "tools_all": ["connect_mcp", "mcp__docs__search"],
+      "output_contains": ["docs"]
+    }
+  },
+  {
+    "id": "E06",
+    "category": "E",
+    "mode": "online",
+    "est_tokens": 3000,
+    "prompt": "connect_mcp docs，再 mcp__docs__get_version。最终回复包含 v2 或 API。",
+    "expect": {
+      "tools_all": ["connect_mcp", "mcp__docs__get_version"],
+      "output_contains": ["v2"]
+    }
+  },
+  {
+    "id": "E07",
+    "category": "E",
+    "mode": "online",
+    "est_tokens": 3000,
+    "prompt": "connect_mcp deploy，调用 mcp__deploy__status，service=api。最终回复包含 running 或 v1。",
+    "auto_approve": true,
+    "expect": {
+      "tools_all": ["connect_mcp", "mcp__deploy__status"],
+      "output_contains": ["running"]
+    }
+  },
+  {
+    "id": "E08",
+    "category": "E",
+    "mode": "online",
+    "est_tokens": 2500,
+    "prompt": "connect_mcp 连接 docs。连接成功后简短说明发现了哪些工具名。",
+    "expect": {
+      "tools_any": ["connect_mcp"],
+      "output_contains": ["search"]
+    }
+  }
+]
