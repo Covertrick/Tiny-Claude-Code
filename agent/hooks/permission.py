@@ -1,14 +1,12 @@
 from ..config import WORKDIR
+from ..mcp import get_mcp_policy
 
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"]
 DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777", "C:\\Windows", "C:\\Users", "/etc/"]
 
 
 def permission_hook(name: str, args: dict) -> str | None:
-    """PreToolUse：拦危险 bash，可疑命令与越界路径询问用户。
-
-    拒绝时返回错误字符串；放行返回 None。
-    """
+    """PreToolUse：拦危险 bash，可疑命令与越界路径询问用户；MCP 按 host policy。"""
     if name == "bash":
         for pattern in DENY_LIST:
             if pattern in args.get("command", ""):
@@ -30,6 +28,14 @@ def permission_hook(name: str, args: dict) -> str | None:
             choice = input("是否继续？(y/n): ").strip().lower()
             if choice not in ("y", "yes"):
                 return "Error: 操作被拒绝"
+
+    if name.startswith("mcp__"):
+        policy = get_mcp_policy(name)
+        if policy != "allow":
+            print(f"\n\033[33m[permission] 外部工具 {name}({args})\033[0m")
+            choice = input("是否继续？(y/n): ").strip().lower()
+            if choice not in ("y", "yes"):
+                return "Error: MCP 操作被用户拒绝"
 
     return None
 

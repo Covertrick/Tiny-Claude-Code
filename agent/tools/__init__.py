@@ -1,6 +1,10 @@
-"""父 Agent 工具表：BASE_TOOLS + task / todo_write / load_skill + 持久化任务工具。"""
+"""父 Agent 工具表：BASE_TOOLS + task / todo / 任务系统 / skill / connect_mcp。
+
+MCP 发现到的工具不写死在这里，由 mcp.assemble_tool_pool 每轮动态拼接。
+"""
 
 from .base import BASE_HANDLERS, BASE_TOOLS
+from .mcp_connect import CONNECT_MCP_TOOL, run_connect_mcp
 from .skill import load_skill
 from .task import run_subagent
 from .task_mgmt import (
@@ -183,6 +187,7 @@ TASK_TOOLS = [
             },
         },
     },
+    CONNECT_MCP_TOOL,
 ]
 
 TOOL_HANDLERS = {
@@ -196,6 +201,7 @@ TOOL_HANDLERS = {
     "claim_task": run_claim_task,
     "complete_task": run_complete_task,
     "load_skill": load_skill,
+    "connect_mcp": run_connect_mcp,
 }
 
 __all__ = ["TASK_TOOLS", "TOOL_HANDLERS", "TASK_MGMT_TOOLS"]

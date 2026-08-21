@@ -2,17 +2,22 @@ import json
 
 import requests
 
+from ..background import inject_background_results
 from ..compaction import COMPACTOR, MAX_REACTIVE_RETRIES, is_context_overflow
 from ..core.execute import execute_tool
 from ..core.llm import chat
 from ..hooks import trigger_hook
+from ..mcp import assemble_tool_pool, mcp_system_addon
 from ..memory import build_system, consolidate_memories, extract_memories, load_memories
 from ..tools import TASK_TOOLS, TOOL_HANDLERS
 
 
 def _update_system_message(messages: list) -> None:
-    """按当前对话召回记忆，刷新 messages 首条 system。"""
+    """按当前对话召回记忆，并追加已连接 MCP 说明。"""
     system = build_system(load_memories(messages))
+    addon = mcp_system_addon()
+    if addon:
+        system = f"{system}\n\n{addon}"
     if messages and messages[0].get("role") == "system":
         messages[0]["content"] = system
     else:
@@ -20,20 +25,20 @@ def _update_system_message(messages: list) -> None:
 
 
 def agent_loop(messages: list, active_request: str = ""):
-    """父 Agent 主循环：召回记忆 → 压缩 → 调模型 → 执行工具，直到模型不再 tool_calls。
-
-    messages 就地修改。每轮开始时按对话召回记忆并更新 system；
-    正常结束时尝试 extract_memories，若有新记忆则触发 consolidate_memories。
-    """
-    _update_system_message(messages)
+    """父 Agent 主循环：记忆 → 后台结果 → 动态工具池 → 调模型 → 执行工具。"""
     rounds_since_todo = 0
     reactive_retries = 0
 
     while True:
+        inject_background_results(messages)
+        # 每轮刷新 system（含记忆召回 + 已连接 MCP）；connect_mcp 后下一轮生效
+        _update_system_message(messages)
         messages[:] = COMPACTOR.prepare(messages, active_request)
 
+        tools, handlers = assemble_tool_pool(TASK_TOOLS, TOOL_HANDLERS)
+
         try:
-            msg = chat(messages, tools=TASK_TOOLS, max_tokens=5000)
+            msg = chat(messages, tools=tools, max_tokens=5000)
         except requests.HTTPError as e:
             if reactive_retries < MAX_REACTIVE_RETRIES and is_context_overflow(e):
                 print("\033[33m[reactive compact] 上下文仍然过长，应急压缩后重试\033[0m")
@@ -56,7 +61,12 @@ def agent_loop(messages: list, active_request: str = ""):
             func = tool_call["function"]
             name = func["name"]
             args = json.loads(func.get("arguments") or "{}")
-            output = execute_tool(name, args, TOOL_HANDLERS)
+            output = execute_tool(
+                name,
+                args,
+                handlers,
+                tool_call_id=tool_call.get("id", ""),
+            )
             if name in (
                 "todo_write",
                 "create_task",
