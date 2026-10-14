@@ -14,6 +14,12 @@ venv/
 .memory/
 **/.runtime/
 
+# QQ / NapCat 本地数据
+napcat/
+NapCat*/
+*.db
+
+
 # 评测：保留本地详细报告，入库汇总见 evals/SUMMARY.md
 evals/reports/
 

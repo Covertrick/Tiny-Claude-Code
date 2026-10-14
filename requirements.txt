@@ -1,0 +1,6 @@
+requests>=2.31.0
+python-dotenv>=1.0.0
+PyYAML>=6.0
+websocket-client>=1.6.0
+APScheduler>=3.10,<4
+# 可选：duckduckgo-search（失败时 agent.search 走 HTML 兜底）

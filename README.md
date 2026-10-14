@@ -98,27 +98,17 @@ User Input
 
 ```text
 Tiny-Claude-Code/
-├── agent/                      # 运行时包（纯原生 Python）
-│   ├── main.py                 # CLI 入口
-│   ├── config.py               # API_KEY / BASE_URL / MODEL_NAME / 路径
-│   ├── core/
-│   │   ├── loop.py             # ★ Harness 主循环
-│   │   ├── execute.py          # PreToolUse → 分发（含后台）→ PostToolUse
-│   │   └── llm.py              # OpenAI 兼容 chat/completions
-│   ├── tools/                  # 工具 schema + handlers
-│   ├── hooks/                  # 生命周期与权限
-│   ├── compaction/             # 上下文压缩管线
-│   ├── memory/                 # 长期记忆召回 / 提取 / 整合
-│   ├── skill_load/             # Skills 扫描与系统提示拼装
-│   ├── tasks/                  # 持久化任务 DAG
-│   ├── background/             # 后台 bash 管理器
-│   ├── mcp/                    # MCP 连接、策略、动态工具池
-│   └── .runtime/               # 运行时落盘（gitignore）
-├── skills/                     # 技能文档 SKILL.md
-├── evals/                      # 离线 + 在线评测
-│   ├── runner.py
-│   ├── cases/                  # A–F 用例
-│   └── reports/                # 评测报告
+├── agent/                      # ★ 统一 QQ Agent 包
+│   ├── __main__.py             # python -m agent → QQ
+│   ├── main.py                 # 可选 Coding CLI
+│   ├── config.py               # API + OneBot + 路径
+│   ├── channel/                # OneBot 路由 / 群缓存 / 会话
+│   ├── core/                   # agent_loop / llm / execute
+│   ├── tools/qq.py             # QQ 工具面（无 coding 工具）
+│   ├── knowledge/ · schedules/ # 多租户记忆 · 待办多点催办
+│   ├── scheduler.py            # APScheduler 主动催办
+│   └── .runtime/qq/            # memory/ · sessions/ · files/
+├── docs/ · skills/ · evals/ · napcat/
 └── README.md
 ```
 
@@ -159,6 +149,31 @@ python -m agent.main
 - 输入任务后回车发送  
 - 输入 `exit` 或空行退出  
 - `Ctrl+C` 中断  
+
+### QQ Agent（主产品）
+
+单一包 `agent/`：OneBot 频道 + 自研 Agent Loop（多租户记忆、待办催办、搜索、文件；群未 @ 只缓存）。
+
+文档与评价：[`docs/README.md`](docs/README.md)（**值得做，但别一次吃完**）。
+
+| 点 | 评价 |
+|----|------|
+| 三层单向依赖 + 绞杀者 | 强推 ✅ `channel → core → tools.qq` |
+| QQ 路径去掉 bash/edit/Task DAG | 强推 ✅ |
+| APScheduler + SQLite 催办 | 已收敛为 `schedule_reminder` ✅ |
+| 多租户记忆隔离 | 强推 ✅ `memory/private_*` · `group_*` |
+| 全面 asyncio + Redis + Chroma | **后置** ⏸ |
+
+```bash
+pip install -r requirements.txt
+python -m agent.smoke_test
+python -m agent.demo          # 不连 QQ
+# NapCat 正向 WebSocket 就绪后：
+python -m agent
+# 可选：原终端 Coding CLI
+python -m agent.main
+```
+
 
 ### 跑评测
 
