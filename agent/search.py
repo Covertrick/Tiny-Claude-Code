@@ -1,19 +1,21 @@
-"""联网搜索 + 打开链接读正文。支持 QQ_FETCH_PROXY；Reddit 优先 JSON，失败再 Jina。"""
+"""联网搜索 + 打开链接读正文。走统一 HTTP 连接池；空结果也返回可回复文案。"""
 
 from __future__ import annotations
 
 import html as html_lib
 import json
-import os
 import re
 import urllib.parse
 
-import requests
-
-_UA = (
-    "Mozilla/5.0 (compatible; TinyQQAgent/1.0; +https://github.com/local) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+from agent.http_client import (
+    fetch_proxies,
+    get_sync_client,
+    http_backend,
+    proxy_url,
+    sync_get_text,
+    sync_post_form,
 )
+
 _URL_RE = re.compile(r"https?://[^\s<>\"'`]+", re.I)
 
 
@@ -29,55 +31,70 @@ def extract_urls(text: str, *, limit: int = 3) -> list[str]:
     return found
 
 
-def _proxies() -> dict[str, str] | None:
-    """外网抓取代理：QQ_FETCH_PROXY > HTTPS_PROXY > HTTP_PROXY。"""
-    raw = (
-        os.getenv("QQ_FETCH_PROXY")
-        or os.getenv("HTTPS_PROXY")
-        or os.getenv("https_proxy")
-        or os.getenv("HTTP_PROXY")
-        or os.getenv("http_proxy")
-        or ""
-    ).strip()
-    if not raw:
-        return None
-    return {"http": raw, "https": raw}
+def _proxy_hint() -> str:
+    if fetch_proxies():
+        return ""
+    return (
+        "（当前无代理。外网超时可在 agent/.env 设 "
+        "QQ_FETCH_PROXY=http://127.0.0.1:7890）"
+    )
 
 
-def web_search(query: str, max_results: int = 5) -> str:
-    q = (query or "").strip()
-    if not q:
-        return "搜索词为空"
-    proxies = _proxies()
+def _empty_search_reply(
+    query: str,
+    *,
+    tried: list[str],
+    errors: list[str] | None = None,
+) -> str:
+    """无结果 / 全失败时仍给模型可转述的中文说明（禁止空串）。"""
+    lines = [
+        f"【联网搜索】关键词：{query}",
+        "状态：未找到相关公开网页" if not errors else "状态：搜索未成功",
+        f"已尝试：{' / '.join(tried) if tried else '无'}",
+    ]
+    if errors:
+        lines.append("细节：" + "；".join(errors[:3]))
+    hint = _proxy_hint()
+    if hint:
+        lines.append(hint.strip())
+    lines.append(
+        "请用人设口语回复用户：说明没搜到或暂时搜不动，"
+        "可建议换关键词、开代理，或直接贴链接让我用 fetch_url；"
+        "禁止沉默，禁止编造搜索结果。"
+    )
+    return "\n".join(lines)
 
+
+def _ddgs_search(query: str, max_results: int) -> list[dict] | None:
     try:
         from duckduckgo_search import DDGS
-
-        results = [
+    except ImportError:
+        return None
+    try:
+        proxy = proxy_url()
+        rows = list(DDGS(proxy=proxy).text(query, max_results=max_results))
+        return [
             {
                 "title": item.get("title"),
                 "href": item.get("href"),
                 "body": item.get("body"),
             }
-            for item in DDGS(proxy=proxies.get("https") if proxies else None).text(
-                q, max_results=max_results
-            )
+            for item in rows
+            if item
         ]
-        if results:
-            return json.dumps(results, ensure_ascii=False, indent=2)
     except Exception:
-        pass
+        return None
 
+
+def _ddg_html_search(query: str, max_results: int) -> list[dict] | None:
     try:
-        resp = requests.post(
+        status, page = sync_post_form(
             "https://html.duckduckgo.com/html/",
-            data={"q": q},
-            headers={"User-Agent": _UA},
-            timeout=30,
-            proxies=proxies,
+            data={"q": query},
+            timeout=30.0,
         )
-        resp.raise_for_status()
-        page = resp.text
+        if status >= 400 or not page:
+            return None
         titles = re.findall(
             r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
             page,
@@ -97,28 +114,40 @@ def web_search(query: str, max_results: int = 5) -> str:
             m = re.search(r"uddg=([^&]+)", href)
             real = urllib.parse.unquote(m.group(1)) if m else href
             results.append({"title": clean_title, "href": real, "body": body})
+        return results
+    except Exception:
+        return None
+
+
+def web_search(query: str, max_results: int = 5) -> str:
+    """多路搜索；无论成败都返回非空中文/JSON，方便模型回话。"""
+    q = (query or "").strip()
+    if not q:
         return (
-            json.dumps(results, ensure_ascii=False, indent=2)
-            if results
-            else "未找到相关结果"
+            "【联网搜索】关键词为空\n"
+            "请口语请用户补充想搜什么，禁止装作已搜索。"
         )
-    except Exception as e:
-        return f"搜索失败: {e}"
 
+    tried: list[str] = []
+    errors: list[str] = []
 
-def _session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update(
-        {
-            "User-Agent": _UA,
-            "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        }
-    )
-    proxies = _proxies()
-    if proxies:
-        s.proxies.update(proxies)
-    return s
+    tried.append("duckduckgo-api")
+    rows = _ddgs_search(q, max_results)
+    if rows:
+        return json.dumps(rows, ensure_ascii=False, indent=2)
+    if rows is None:
+        errors.append("duckduckgo-api 不可用或异常")
+
+    tried.append("duckduckgo-html")
+    rows = _ddg_html_search(q, max_results)
+    if rows:
+        return json.dumps(rows, ensure_ascii=False, indent=2)
+    if rows is None:
+        errors.append("duckduckgo-html 请求失败")
+    else:
+        errors.append("各通道均无命中")
+
+    return _empty_search_reply(q, tried=tried, errors=errors)
 
 
 def _html_to_text(raw: str) -> str:
@@ -230,18 +259,17 @@ def _clip(text: str, max_chars: int) -> str:
     return text[:max_chars] + "…"
 
 
-def _via_jina(url: str, sess: requests.Session, *, max_chars: int) -> str | None:
-    """Jina Reader：把任意 URL 转成纯文本（需能访问 r.jina.ai）。"""
+def _via_jina(url: str, *, max_chars: int) -> str | None:
     jurl = "https://r.jina.ai/" + url
     try:
-        r = sess.get(
+        status, _final, text = sync_get_text(
             jurl,
-            timeout=45,
-            headers={**dict(sess.headers), "Accept": "text/plain"},
+            headers={"Accept": "text/plain"},
+            timeout=45.0,
         )
-        if not r.ok or len(r.text.strip()) < 40:
+        if status >= 400 or len((text or "").strip()) < 40:
             return None
-        return _clip(f"来源：{url}\n（via jina）\n\n{r.text.strip()}", max_chars)
+        return _clip(f"来源：{url}\n（via jina）\n\n{text.strip()}", max_chars)
     except Exception:
         return None
 
@@ -250,87 +278,91 @@ def fetch_url(url: str, *, max_chars: int = 8000) -> str:
     """打开链接，抽出可读正文（Reddit → JSON；失败 → Jina；再失败 → HTML）。"""
     u = (url or "").strip()
     if not u:
-        return "链接为空"
+        return "链接为空。请口语请用户贴一个 http(s) 链接。"
     parsed = urllib.parse.urlparse(u)
     if parsed.scheme not in ("http", "https"):
-        return "只支持 http/https 链接"
+        return "只支持 http/https 链接。请口语说明并请用户换链接。"
 
-    sess = _session()
-    proxy_hint = (
-        ""
-        if _proxies()
-        else "（当前无代理。Reddit 等站若超时，可在 agent/.env 设 QQ_FETCH_PROXY=http://127.0.0.1:7890）"
-    )
+    proxy_hint = _proxy_hint()
     last_err = ""
 
     try:
-        head = sess.get(u, timeout=25, allow_redirects=True)
-        final = head.url or u
+        if http_backend() == "httpx":
+            client = get_sync_client()
+            head = client.get(u, timeout=25.0)
+            status = head.status_code
+            final = str(head.url) or u
+            head_text = head.text
+            ctype = (head.headers.get("Content-Type") or "").lower()
+        else:
+            status, final, head_text = sync_get_text(u, timeout=25.0)
+            ctype = ""
 
         if _is_reddit(final) or _is_reddit(u):
             jurl = _reddit_json_url(final)
             try:
-                jr = sess.get(
+                st, _fu, raw = sync_get_text(
                     jurl,
-                    timeout=25,
-                    headers={**dict(sess.headers), "Accept": "application/json"},
+                    headers={"Accept": "application/json"},
+                    timeout=25.0,
                 )
-                if jr.ok:
-                    text = _parse_reddit_json(jr.json())
+                if st < 400 and raw:
+                    text = _parse_reddit_json(json.loads(raw))
                     if text:
                         return _clip(f"来源：{final}\n\n{text}", max_chars)
             except Exception as e:
                 last_err = str(e)
 
-            via = _via_jina(final, sess, max_chars=max_chars)
+            via = _via_jina(final, max_chars=max_chars)
             if via:
                 return via
 
-            raw = head.text if head.ok else ""
-            if raw:
-                text = _html_to_text(raw)
+            if head_text:
+                text = _html_to_text(head_text)
                 if len(text) >= 40:
                     return _clip(f"来源：{final}\n\n{text}", max_chars)
 
             return (
                 f"打不开这个 Reddit 链接：{final}\n"
-                f"{last_err or f'HTTP {head.status_code}'}\n"
+                f"{last_err or f'HTTP {status}'}\n"
                 f"{proxy_hint}\n"
-                f"也可以直接把帖子正文粘贴过来，我照样总结。"
+                f"请口语告诉用户打不开，可请对方粘贴正文让我总结；禁止装作读到了帖子。"
             )
 
-        ctype = (head.headers.get("Content-Type") or "").lower()
-        if "application/json" in ctype:
+        if "application/json" in ctype or (
+            head_text.strip().startswith("{") or head_text.strip().startswith("[")
+        ):
             try:
-                blob = json.dumps(head.json(), ensure_ascii=False, indent=2)
+                blob = json.dumps(json.loads(head_text), ensure_ascii=False, indent=2)
             except Exception:
-                blob = head.text
-            return _clip(f"来源：{final}\n\n{blob}", max_chars)
+                blob = head_text
+            if len(blob.strip()) >= 20:
+                return _clip(f"来源：{final}\n\n{blob}", max_chars)
 
-        if head.ok and len(head.text) >= 40:
-            text = _html_to_text(head.text)
+        if status < 400 and len(head_text) >= 40:
+            text = _html_to_text(head_text)
             if len(text) >= 40:
                 return _clip(f"来源：{final}\n\n{text}", max_chars)
 
-        via = _via_jina(final, sess, max_chars=max_chars)
+        via = _via_jina(final, max_chars=max_chars)
         if via:
             return via
 
         return (
-            f"打开失败 HTTP {head.status_code}：{final}\n"
+            f"打开失败 HTTP {status}：{final}\n"
             f"{proxy_hint}\n"
-            f"也可以把正文粘贴过来让我总结。"
+            f"请口语告诉用户打不开，可请对方粘贴正文；禁止编造页面内容。"
         )
     except Exception as e:
         last_err = str(e)
-        via = _via_jina(u, sess, max_chars=max_chars)
+        via = _via_jina(u, max_chars=max_chars)
         if via:
             return via
         return (
             f"打开链接失败：{last_err}\n"
             f"目标：{u}\n"
             f"{proxy_hint}\n"
-            f"也可以把正文粘贴过来让我总结。"
+            f"请口语告诉用户打不开，可请对方粘贴正文；禁止编造页面内容。"
         )
 
 

@@ -9,7 +9,8 @@ def wrap_untrusted(label: str, text: str, *, max_len: int = 4000) -> str:
     """用边界标签包裹外部数据，并提示模型勿当指令执行。"""
     body = (text or "").strip()
     if not body:
-        return ""
+        # 空结果也要包一层，避免工具返回空串导致模型无话可接
+        body = "（无内容：可能未搜到或抓取失败，请口语如实告知用户，勿编造）"
     # 弱化常见注入句式（不保证绝对安全，只是降风险）
     body = re.sub(
         r"(?i)(ignore\s+(all\s+)?(previous|above|prior)\s+instructions?)",

@@ -1,4 +1,4 @@
-# Tiny-Claude-Code 评测汇总
+# Tiny QQ Agent 评测汇总
 
 - **模型**: qwen3.7-plus（以 `.env` 为准）
 - **日期**: 2026-08-21

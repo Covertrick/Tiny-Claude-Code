@@ -37,10 +37,31 @@ def snapshot_metrics() -> dict[str, Any]:
     except Exception:
         usage = {}
 
+    http_info = {}
+    try:
+        from agent.http_client import http_backend
+
+        http_info = {"backend": http_backend()}
+    except Exception:
+        http_info = {}
+
+    vec_info = {}
+    try:
+        from agent.config import VECTOR_BACKEND
+        from agent.vector import get_vector_index
+
+        if VECTOR_BACKEND not in ("memory", "off", "none", "0"):
+            idx = get_vector_index("knowledge")
+            vec_info = {"backend": idx.backend, "count": idx.count()}
+    except Exception as e:
+        vec_info = {"error": str(e)}
+
     return {
         "ts": time.time(),
         "pid": os.getpid(),
         "embedding": embedding_backend(),
+        "http": http_info,
+        "vector": vec_info,
         "memory": {
             "total": total,
             "archived": archived,

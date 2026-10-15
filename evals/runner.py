@@ -169,7 +169,7 @@ def write_report(results: list[dict], summary: dict) -> Path:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Tiny-Claude-Code evals")
+    parser = argparse.ArgumentParser(description="Tiny QQ Agent evals")
     parser.add_argument(
         "--mode",
         choices=["offline", "online", "all"],

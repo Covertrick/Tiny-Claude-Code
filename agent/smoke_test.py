@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import agent.config as cfg
+
+# .env 的 load_dotenv(override=True) 之后再盖一层，冒烟强制哈希，避免 HF 卡住
+os.environ["QQ_EMBEDDING_BACKEND"] = "hash"
+os.environ["QQ_FORCE_SEMANTIC"] = "0"
+cfg.FORCE_SEMANTIC = "0"
+
 from agent import user_files as filemod
+from agent.embedding import reset_embedder
 from agent.knowledge.store import KnowledgeStore, scope_subdir
 from agent.schedules.rules import plan_reminder_times
 from agent.schedules.store import ScheduleStore
+
+reset_embedder()
 
 
 def test_knowledge_isolation() -> None:
@@ -298,6 +308,61 @@ def test_concurrency_config() -> None:
     print("concurrency: OK")
 
 
+def test_web_search_empty_reply() -> None:
+    from agent.search import web_search
+    from agent.channel.trust import wrap_untrusted
+
+    empty_q = web_search("")
+    assert "关键词为空" in empty_q or "补充" in empty_q
+    wrapped = wrap_untrusted("web_search", "")
+    assert "untrusted_content" in wrapped
+    assert wrapped.strip()  # 禁止空串
+    print("web search empty reply: OK")
+
+
+def test_http_pool() -> None:
+    from agent.http_client import http_backend, run_coro
+
+    assert http_backend() in ("httpx", "requests")
+    if http_backend() != "httpx":
+        print("http pool: SKIP (no httpx)")
+        return
+
+    async def _ping():
+        return 1 + 1
+
+    assert run_coro(_ping(), timeout=5) == 2
+    from agent.core import llm as llm_mod
+
+    assert callable(llm_mod.chat) and callable(llm_mod.chat_async)
+    print(f"http pool: OK ({http_backend()})")
+
+
+def test_vector_index() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        old = cfg.VECTOR_DIR
+        cfg.VECTOR_DIR = Path(tmp)
+        try:
+            from agent.vector.store import VectorIndex
+
+            idx = VectorIndex("smoke")
+            a = [1.0, 0.0, 0.0] + [0.0] * 381
+            b = [0.9, 0.1, 0.0] + [0.0] * 381
+            c = [0.0, 1.0, 0.0] + [0.0] * 381
+            idx.upsert("a", a, meta={"t": "a"})
+            idx.upsert("b", b, meta={"t": "b"})
+            idx.upsert("c", c, meta={"t": "c"})
+            hits = idx.search(a, top_k=2, min_score=0.0)
+            assert hits and hits[0][0] in ("a", "b")
+            assert idx.count() == 3
+            idx.delete("c")
+            assert idx.count() == 2
+            print(f"vector index: OK ({idx.backend})")
+            idx.close()
+        finally:
+            cfg.VECTOR_DIR = old
+
+
 if __name__ == "__main__":
     test_knowledge_isolation()
     test_file_scope()
@@ -311,4 +376,7 @@ if __name__ == "__main__":
     test_send_chunks()
     test_morning_brief()
     test_concurrency_config()
+    test_web_search_empty_reply()
+    test_http_pool()
+    test_vector_index()
     print("all smoke tests passed")

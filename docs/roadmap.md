@@ -19,10 +19,16 @@
 | 日历 ICS 导出 | ✅ |
 | Google/Outlook 双向同步 | ⏸ 接口占位 |
 
-## Phase 5（后置）
+## Phase 5（进行中）
 
-- 全程 asyncio + HTTP 连接池
-- Google Calendar / Outlook OAuth 双向同步
-- sqlite-vec / 强制语义索引
-- PDF/图片 OCR 与缩略图
-- 插件市场与远程热更新
+| 项 | 状态 |
+|----|------|
+| HTTP 连接池（httpx AsyncClient + 常驻事件循环） | ✅ |
+| LLM `chat` / `chat_async` 走连接池 | ✅ |
+| 强制语义嵌入（`QQ_FORCE_SEMANTIC` + fastembed） | ✅ |
+| 持久向量索引（sqlite-vec / BLOB 回退）knowledge+vault | ✅ |
+| 联网搜索整合（空结果也回应） | ✅ |
+| Google Calendar / Outlook OAuth 双向同步 | ⏸ |
+| PDF/图片 OCR 与缩略图 | ⏸ |
+| 插件市场与远程热更新 | ⏸ |
+| OneBot / NapCat 全程 asyncio 重写 | ⏸ |

@@ -23,10 +23,15 @@ from agent.config import (
     MEMORY_DIR,
     RECALL_MIN_SCORE,
     RECALL_TOP_K,
+    VECTOR_BACKEND,
     VECTOR_DIR,
     ensure_runtime_dirs,
 )
 from agent.embedding import cosine, get_embedder
+
+
+def _use_vector_index() -> bool:
+    return VECTOR_BACKEND not in ("memory", "off", "none", "0")
 
 KB_KINDS = ("note", "doc", "preference", "fact")
 LAYERS = ("episodic", "semantic")
@@ -82,8 +87,44 @@ class KnowledgeStore:
         self._lock = threading.RLock()
         self._records: list[MemoryRecord] = []
         self._vectors: list[list[float]] = []
+        self._vindex = None
+        if _use_vector_index():
+            try:
+                from agent.vector import get_vector_index
+
+                self._vindex = get_vector_index("knowledge")
+                print(f"[knowledge] 向量索引 backend={self._vindex.backend}")
+            except Exception as e:
+                print(f"[knowledge] 向量索引不可用，内存召回: {e}")
         self._migrate_legacy()
         self._load_all()
+
+    def _index_upsert(self, record: MemoryRecord, vec: list[float]) -> None:
+        if self._vindex is None:
+            return
+        try:
+            self._vindex.upsert(
+                record.id,
+                vec,
+                meta={
+                    "user_id": record.user_id,
+                    "group_id": record.group_id,
+                    "kind": record.kind,
+                    "scope": record.scope,
+                    "layer": record.layer,
+                    "archived": bool(record.archived),
+                },
+            )
+        except Exception as e:
+            print(f"[knowledge] vector upsert skip: {e}")
+
+    def _index_delete(self, memory_id: str) -> None:
+        if self._vindex is None:
+            return
+        try:
+            self._vindex.delete(memory_id)
+        except Exception as e:
+            print(f"[knowledge] vector delete skip: {e}")
 
     def _embed_text(self, record: MemoryRecord) -> str:
         return " ".join(
@@ -147,8 +188,10 @@ class KnowledgeStore:
                     if not line:
                         continue
                     record = self._parse_record(json.loads(line))
+                    vec = self._embedder.embed(self._embed_text(record))
                     self._records.append(record)
-                    self._vectors.append(self._embedder.embed(self._embed_text(record)))
+                    self._vectors.append(vec)
+                    self._index_upsert(record, vec)
 
     def _append_disk(self, record: MemoryRecord) -> None:
         d = scope_dir(record.scope, self.root)
@@ -199,8 +242,10 @@ class KnowledgeStore:
             archived=False,
         )
         with self._lock:
+            vec = self._embedder.embed(self._embed_text(record))
             self._records.append(record)
-            self._vectors.append(self._embedder.embed(self._embed_text(record)))
+            self._vectors.append(vec)
+            self._index_upsert(record, vec)
             self._append_disk(record)
         return record
 
@@ -228,6 +273,7 @@ class KnowledgeStore:
         qvec = self._embedder.embed(query or "")
         hits: list[tuple[MemoryRecord, float]] = []
         with self._lock:
+            eligible: list[tuple[MemoryRecord, list[float]]] = []
             for record, vec in zip(self._records, self._vectors):
                 if str(record.user_id) != str(user_id):
                     continue
@@ -244,17 +290,45 @@ class KnowledgeStore:
                             "private:"
                         ):
                             continue
-                score = cosine(qvec, vec)
-                # 语义层加权；长期未访问降权（艾宾浩斯近似）
-                if prefer_semantic and record.layer == "semantic":
-                    score += 0.05
-                score *= self._decay_weight(record)
-                if score < floor:
-                    continue
-                hits.append((record, score))
+                eligible.append((record, vec))
+
+            by_id = {r.id: (r, v) for r, v in eligible}
+            used_index = False
+            if self._vindex is not None and by_id:
+                try:
+                    raw = self._vindex.search(
+                        qvec,
+                        top_k=min(max(top_k * 5, top_k), len(by_id)),
+                        min_score=0.0,
+                        filter_ids=by_id.keys(),
+                    )
+                    for mid, score, _meta in raw:
+                        pair = by_id.get(mid)
+                        if not pair:
+                            continue
+                        record, _vec = pair
+                        if prefer_semantic and record.layer == "semantic":
+                            score += 0.05
+                        score *= self._decay_weight(record)
+                        if score < floor:
+                            continue
+                        hits.append((record, score))
+                    used_index = True
+                except Exception as e:
+                    print(f"[knowledge] vector search fallback: {e}")
+
+            if not used_index:
+                for record, vec in eligible:
+                    score = cosine(qvec, vec)
+                    if prefer_semantic and record.layer == "semantic":
+                        score += 0.05
+                    score *= self._decay_weight(record)
+                    if score < floor:
+                        continue
+                    hits.append((record, score))
+
             hits.sort(key=lambda x: x[1], reverse=True)
             out = hits[:top_k]
-            # 命中即 touch，并重写该 scope 落盘
             touched_scopes: set[str] = set()
             for rec, _ in out:
                 self._touch(rec)
@@ -301,6 +375,7 @@ class KnowledgeStore:
                 return False
             self._records = kept_r
             self._vectors = kept_v
+            self._index_delete(deleted.id)
             self._rewrite_scope(deleted.scope)
             return True
 
@@ -362,7 +437,9 @@ class KnowledgeStore:
                     if record.title:
                         record.metadata["title"] = record.title
                 record.last_accessed = _now_iso()
-                self._vectors[i] = self._embedder.embed(self._embed_text(record))
+                vec = self._embedder.embed(self._embed_text(record))
+                self._vectors[i] = vec
+                self._index_upsert(record, vec)
                 self._rewrite_scope(record.scope)
                 return record
         return None

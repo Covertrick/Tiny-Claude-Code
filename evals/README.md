@@ -1,6 +1,6 @@
 # 评测集（Evals）
 
-面向 Tiny-Claude-Code 的量化评测：覆盖 A–F 六类维度。  
+面向 Tiny QQ Agent 的量化评测：覆盖 A–F 六类维度。  
 模型：`.env` 中的 `MODEL_NAME`（当前预期 `qwen3.7-plus`）。
 
 ## Token 预算（约剩 47 万）

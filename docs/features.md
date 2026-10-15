@@ -145,10 +145,17 @@ OCR / 图表看板：**后置**。
 
 ---
 
+## Phase 5（已落地部分）
+
+- httpx AsyncClient 连接池 + `chat` / `chat_async`  
+- 强制语义嵌入（`QQ_FORCE_SEMANTIC`；模型下载失败则哈希回退）  
+- sqlite-vec 持久索引（knowledge / vault；无扩展则 BLOB 回退）  
+- 联网搜索统一走连接池；无结果/失败也返回可转述说明，模型必须口语回应  
+
 ## 后置（尚未做）
 
 - PDF/DOCX 全文切片 RAG  
-- sqlite-vec 替换 Python 余弦扫描  
 - 图片 OCR / 多模态发票  
-- 公网 HTTPS Dashboard  
-- 全面 asyncio + Redis  
+- OneBot 全程 asyncio 重写  
+- Google Calendar OAuth  
+

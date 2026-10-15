@@ -51,6 +51,11 @@ SCHEDULES_DB = QQ_RUNTIME / "schedules.db"
 FILES_DB = QQ_RUNTIME / "files.db"
 VECTOR_DIR = QQ_RUNTIME / "vector"
 
+# 向量后端：auto|sqlite-vec|memory（auto≈sqlite-vec，扩展缺失时 BLOB 回退）
+VECTOR_BACKEND = (os.getenv("QQ_VECTOR_BACKEND") or "auto").strip().lower()
+# 强制语义嵌入：1=优先 fastembed，失败时大声告警仍回退哈希（除非 QQ_FORCE_SEMANTIC=strict）
+FORCE_SEMANTIC = (os.getenv("QQ_FORCE_SEMANTIC") or "1").strip().lower()
+
 SHORT_TERM_MAX_TURNS = int(os.getenv("QQ_SHORT_TERM_MAX_TURNS", "20"))
 RECALL_TOP_K = int(os.getenv("QQ_RECALL_TOP_K", "5"))
 # 预召回硬截断：低于此分直接丢弃（哈希向量宜 0.28~0.4；fastembed 可调到 0.72~0.82）
@@ -153,6 +158,7 @@ def ensure_runtime_dirs() -> None:
         GROUP_FILES_DIR,
         MEMORY_DIR,
         SESSION_DIR,
+        VECTOR_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)
 

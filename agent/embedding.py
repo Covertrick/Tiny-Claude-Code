@@ -1,12 +1,10 @@
-"""可替换嵌入底座：优先 fastembed，失败回退哈希向量。
-
-Phase 1：接口统一，便于后续接 sqlite-vec；不强制安装重依赖。
-"""
+"""可替换嵌入底座：默认强制语义（fastembed），失败按 FORCE_SEMANTIC 策略回退。"""
 
 from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 import threading
 from typing import Protocol
@@ -40,13 +38,12 @@ class HashEmbedder:
 
 
 class FastEmbedEmbedder:
-    """可选语义嵌入（需 pip install fastembed）。"""
+    """语义嵌入（需 pip install fastembed）。"""
 
     def __init__(self, model: str = "BAAI/bge-small-zh-v1.5"):
         from fastembed import TextEmbedding  # type: ignore
 
         self._model = TextEmbedding(model_name=model)
-        # bge-small 多为 384 维
         probe = list(self._model.embed(["ping"]))[0]
         self.dim = len(probe)
         self._lock = threading.Lock()
@@ -54,7 +51,6 @@ class FastEmbedEmbedder:
     def embed(self, text: str) -> list[float]:
         with self._lock:
             vec = list(self._model.embed([text or ""]))[0]
-        # 已是单位向量或近似；再归一一次
         norm = math.sqrt(sum(v * v for v in vec)) or 1.0
         return [float(v) / norm for v in vec]
 
@@ -64,6 +60,17 @@ _LOCK = threading.Lock()
 _BACKEND = "hash"
 
 
+def _force_mode() -> str:
+    from agent.config import FORCE_SEMANTIC
+
+    v = (FORCE_SEMANTIC or "1").strip().lower()
+    if v in ("0", "false", "off", "no"):
+        return "off"
+    if v in ("strict", "require", "2"):
+        return "strict"
+    return "on"
+
+
 def get_embedder() -> Embedder:
     global _EMBEDDER, _BACKEND
     if _EMBEDDER is not None:
@@ -71,21 +78,53 @@ def get_embedder() -> Embedder:
     with _LOCK:
         if _EMBEDDER is not None:
             return _EMBEDDER
-        try:
-            import os
+        backend_pref = os.getenv("QQ_EMBEDDING_BACKEND", "auto").lower()
+        force = _force_mode()
+        # 显式 hash 永远跳过语义模型（冒烟/离线）；其余按 FORCE_SEMANTIC / auto
+        if backend_pref == "hash":
+            want_semantic = False
+        elif backend_pref == "fastembed" or force != "off":
+            want_semantic = True
+        else:
+            want_semantic = backend_pref == "auto"
 
-            if os.getenv("QQ_EMBEDDING_BACKEND", "auto").lower() in (
-                "fastembed",
-                "auto",
-            ):
-                _EMBEDDER = FastEmbedEmbedder(
-                    os.getenv("QQ_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
+        if want_semantic:
+            # 避免 HF 超时重试拖死启动（无本地缓存时尤甚）
+            os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "12")
+            os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "12")
+            model = os.getenv("QQ_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
+            load_timeout = float(os.getenv("QQ_EMBEDDING_LOAD_TIMEOUT", "25") or "25")
+            holder: list = []
+
+            def _load() -> None:
+                try:
+                    holder.append(("ok", FastEmbedEmbedder(model)))
+                except Exception as e:  # noqa: BLE001
+                    holder.append(("err", e))
+
+            t = threading.Thread(target=_load, name="fastembed-load", daemon=True)
+            t.start()
+            t.join(load_timeout)
+            if t.is_alive():
+                print(
+                    f"[embed] fastembed 加载超过 {load_timeout:.0f}s（常为 HF 下载超时），"
+                    "回退哈希；有镜像可设 HF_ENDPOINT 后重启"
                 )
+            elif holder and holder[0][0] == "ok":
+                _EMBEDDER = holder[0][1]
                 _BACKEND = "fastembed"
-                print(f"[embed] 使用 fastembed dim={_EMBEDDER.dim}")
+                print(f"[embed] 强制语义索引 fastembed dim={_EMBEDDER.dim}")
                 return _EMBEDDER
-        except Exception as e:
-            print(f"[embed] fastembed 不可用，回退哈希向量: {e}")
+            else:
+                err = holder[0][1] if holder else RuntimeError("unknown")
+                msg = f"[embed] fastembed 不可用: {err}"
+                if force == "strict" and backend_pref != "hash":
+                    raise RuntimeError(
+                        "QQ_FORCE_SEMANTIC=strict 但 fastembed 加载失败；"
+                        "请 pip install fastembed、确保能下模型，或改 QQ_FORCE_SEMANTIC=1"
+                    ) from err
+                print(f"{msg} → 回退哈希向量（召回质量会下降）")
+
         _EMBEDDER = HashEmbedder()
         _BACKEND = "hash"
         print(f"[embed] 使用哈希向量 dim={_EMBEDDER.dim}")
@@ -95,6 +134,14 @@ def get_embedder() -> Embedder:
 def embedding_backend() -> str:
     get_embedder()
     return _BACKEND
+
+
+def reset_embedder() -> None:
+    """测试用：清空单例，下次 get_embedder 按当前环境变量重建。"""
+    global _EMBEDDER, _BACKEND
+    with _LOCK:
+        _EMBEDDER = None
+        _BACKEND = "hash"
 
 
 def cosine(a: list[float], b: list[float]) -> float:
