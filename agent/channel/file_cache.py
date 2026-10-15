@@ -20,6 +20,7 @@ class RecentFile:
     path: str = ""
     file_id: str = ""
     kind: str = "file"
+    caption: str = ""  # 同帧文字别名
     raw: dict[str, str] = field(default_factory=dict)
 
 
@@ -37,11 +38,13 @@ class RecentFileCache:
         uploader_id: str,
         user: str,
         segments: list[dict[str, str]],
+        caption: str = "",
     ) -> None:
         gid = str(group_id or "")
         if not gid or not segments:
             return
         now = time.time()
+        cap = (caption or "").strip()[:80]
         with self._lock:
             if gid not in self._data:
                 self._data[gid] = deque(maxlen=self.maxlen)
@@ -58,6 +61,7 @@ class RecentFileCache:
                     path=str(seg.get("path") or ""),
                     file_id=str(seg.get("file_id") or ""),
                     kind=str(seg.get("kind") or "file"),
+                    caption=cap or str(seg.get("caption") or ""),
                     raw=dict(seg),
                 )
                 dq.append(item)
@@ -94,6 +98,7 @@ class RecentFileCache:
             "url": item.url,
             "path": item.path,
             "file_id": item.file_id,
+            "caption": item.caption or "",
         }
 
 

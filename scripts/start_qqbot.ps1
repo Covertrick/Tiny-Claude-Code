@@ -1,5 +1,7 @@
-# 启动 QQ Agent（需 NapCat WS ws://127.0.0.1:3001）
+# 一键启动：自动补全 agent/.env → 拉起 NapCat → 启动 QQ Agent
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 Write-Host "Working dir: $(Get-Location)"
-python -m agent
+Write-Host "Bootstrapping NapCat + Agent ..."
+$env:PYTHONUNBUFFERED = "1"
+python -u -m agent

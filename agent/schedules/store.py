@@ -363,6 +363,64 @@ class ScheduleStore:
             finally:
                 conn.close()
 
+    def update_task(
+        self,
+        *,
+        user_id: str,
+        schedule_id: str,
+        title: str | None = None,
+        due_at: str | None = None,
+        category: str | None = None,
+    ) -> ScheduleRecord | None:
+        """更新任务标题/截止/分类（落库 schedules.db）。"""
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM schedules WHERE id = ? AND user_id = ?",
+                    (schedule_id, str(user_id)),
+                ).fetchone()
+                if not row:
+                    return None
+                rec = self._row_to_record(row)
+                new_title = title.strip() if title is not None else rec.title
+                new_due = due_at.strip() if due_at is not None else rec.due_at
+                new_cat = category.strip() if category is not None else rec.category
+                conn.execute(
+                    "UPDATE schedules SET title = ?, due_at = ?, category = ? "
+                    "WHERE id = ? AND user_id = ?",
+                    (new_title, new_due, new_cat, schedule_id, str(user_id)),
+                )
+                # 子催办点同步标题
+                conn.execute(
+                    "UPDATE schedules SET title = ? WHERE parent_id = ? AND user_id = ?",
+                    (new_title, schedule_id, str(user_id)),
+                )
+                conn.commit()
+                return self.get(schedule_id)
+            finally:
+                conn.close()
+
+    def delete(self, *, user_id: str, schedule_id: str) -> bool:
+        """硬删除任务及其催办点。"""
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT id FROM schedules WHERE id = ? AND user_id = ?",
+                    (schedule_id, str(user_id)),
+                ).fetchone()
+                if not row:
+                    return False
+                conn.execute(
+                    "DELETE FROM schedules WHERE user_id = ? AND (id = ? OR parent_id = ?)",
+                    (str(user_id), schedule_id, schedule_id),
+                )
+                conn.commit()
+                return True
+            finally:
+                conn.close()
+
     def mark_reminded(self, schedule_id: str) -> bool:
         with self._lock:
             conn = self._connect()
@@ -379,24 +437,9 @@ class ScheduleStore:
 
 
 def _normalize_iso(value: str) -> str:
-    text = (value or "").strip()
-    if not text:
-        raise ValueError("时间不能为空")
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(text)
-    except ValueError as e:
-        raise ValueError(
-            f"时间格式无效，请用 ISO8601，例如 2026-10-15T15:00:00+08:00: {value}"
-        ) from e
-    if dt.tzinfo is None:
-        from datetime import timedelta
+    from agent.timeutil import parse_to_utc_iso
 
-        dt = dt.replace(tzinfo=timezone(timedelta(hours=8))).astimezone(timezone.utc)
-    else:
-        dt = dt.astimezone(timezone.utc)
-    return dt.isoformat()
+    return parse_to_utc_iso(value)
 
 
 _STORE: ScheduleStore | None = None

@@ -1,42 +1,40 @@
-# 逻辑线路
+# 逻辑流程
 
-## 消息分流
+## 消息主路径
 
 ```mermaid
 flowchart TD
-  E[OneBot 消息] --> V[解析 text + 语音转写 + 文件段]
-  V --> T{群/私聊}
-  T -->|群未@| C[缓存转写文本 0Token]
-  C --> F0[文件静默登记 无摘要]
-  C --> K[关键词正则 → 私聊主人]
-  T -->|群@或私聊| CD{用户冷却 3s?}
-  CD -->|命中| SLOW[你慢点…]
-  CD -->|通过| SEM{信号量}
-  SEM --> FILE{@文件?}
-  FILE -->|有且@| SUM[上下文+文件名一句话摘要 Token少]
-  FILE -->|无| I{intercept?}
-  SUM --> I
-  I -->|待办| DB[schedules.db]
-  I -->|否| A[core.loop + tools.qq]
-  A --> SEND[safe_send 重试/分片/引用]
+  E[OneBot 事件] --> D{去重/冷却/忙?}
+  D -->|丢弃| X[结束]
+  D --> G{群未 @?}
+  G -->|是| C[缓存+静默入库]
+  G -->|@/私聊| Q[job_queue 入队]
+  Q --> F{有附件?}
+  F -->|是| IN[ingest 摘要标签]
+  IN --> ACK[元数据回执]
+  F -->|否| I[意图分类 LLM]
+  I --> P[拼 Prompt<br/>画像+门控记忆]
+  P --> L[agent_loop]
+  L --> R[safe_send 引用回复]
+  R --> H[后台 harvest 画像]
 ```
 
-## 文件杀手锏
+## 文件资产检索
 
-| 场景 | 行为 | Token |
-|------|------|-------|
-| 群友发文件未 @ | 下载/登记 file_index，无摘要 | 0 |
-| 发文件并 @ | 拉近 10 条上下文 → 一句话摘要 → 落盘+SQLite | 极少 |
-| 「把张三简历发我」 | `search_and_send_file` 模糊查 summary/tags | Agent 一轮 |
+```text
+「把上次张三那个PDF发我」
+  → nl_search 解析 类型=pdf / 最近
+  → search_for_user 打分（文件名+摘要+标签）
+  → 直发图片或 upload_file
+  → 回执附带 类型·大小·时间·#标签
+```
 
-落盘：`agent/.runtime/qq/files/groups/{group_id}/` · 库：`files.db` 表 `file_index`。
+## 催办
 
-## 催办 / 早报
-
-- `schedule_reminder` → 多点 tick → APScheduler（0 Token）  
-- 每日 `QQ_MORNING_BRIEF_HOUR` 私聊主人今日待办（查 SQLite，0 Token）  
-
-## 入口
-
-- `python -m agent`：QQ Agent  
-- `python -m agent.main`：Coding CLI  
+```text
+自然语言建催办 → schedule_reminder
+  → SQLite 任务 + 多 tick
+  → APScheduler DateTrigger
+  → 到点 0 Token 私聊/群提醒
+「导出日历」→ ICS 文件（可导入 Google/Outlook）
+```

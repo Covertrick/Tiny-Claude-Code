@@ -17,6 +17,8 @@ from agent.channel.message import (
     extract_cache_text,
     extract_file_segments,
     extract_text,
+    extract_voice_text,
+    has_voice_segment,
     is_at_bot,
     strip_at,
 )
@@ -42,8 +44,26 @@ class MessageRouter:
         self._lock = threading.Lock()
         self._group_at_ts: dict[str, float] = {}
         self._user_cooldown: dict[str, float] = {}
+        self._seen_msg: dict[str, float] = {}  # message_id → ts，去重
         self._sem = threading.Semaphore(max(1, AGENT_CONCURRENCY))
         self.keywords = KeywordWatcher(client)
+
+    def _dedup(self, message_id) -> bool:
+        """5 秒内相同 message_id 视为重复推送，返回 True 表示应丢弃。"""
+        if message_id is None or message_id == "":
+            return False
+        key = str(message_id)
+        now = time.time()
+        with self._lock:
+            # 顺带清过期
+            dead = [k for k, t in self._seen_msg.items() if now - t > 30]
+            for k in dead:
+                self._seen_msg.pop(k, None)
+            last = self._seen_msg.get(key)
+            if last is not None and now - last < 5:
+                return True
+            self._seen_msg[key] = now
+        return False
 
     def handle_event(self, event: dict) -> None:
         # 异地登录 / 被踢 → 退出全部进程
@@ -67,17 +87,21 @@ class MessageRouter:
         sender = event.get("sender") or {}
         nickname = sender.get("card") or sender.get("nickname") or ""
         message_id = event.get("message_id")
+        if self._dedup(message_id):
+            print(f"[qq] drop duplicate message_id={message_id}")
+            return
         at_bot = is_at_bot(raw, self.bot_qq) if is_group else True
         cache_text = extract_cache_text(raw)
         files = extract_file_segments(raw)
 
-        # 群聊附件进近期缓存（供「保存上面的文件」）
+        # 群聊附件进近期缓存（同帧文字作 caption 别名）
         if is_group and group_id and files:
             RECENT_FILES.append(
                 group_id,
                 uploader_id=user_id,
                 user=nickname or user_id,
                 segments=files,
+                caption=cache_text or "",
             )
             if cache_text:
                 GROUP_CACHE.append(
@@ -93,7 +117,7 @@ class MessageRouter:
                     text=f"[附件:{names}]",
                 )
 
-        # —— 群聊未 @：缓存 + 静默存文件 + 关键词（全 0 Token）——
+        # —— 群聊未 @：缓存 + 静默存文件（有同帧文字则绑别名）——
         if is_group and not at_bot:
             if cache_text and not files:
                 GROUP_CACHE.append(
@@ -117,6 +141,7 @@ class MessageRouter:
                         "files": files,
                         "group_id": group_id,
                         "uploader_id": user_id,
+                        "caption": cache_text or "",
                     },
                     daemon=True,
                 ).start()
@@ -152,12 +177,8 @@ class MessageRouter:
         busy_key = cool_key
         with self._lock:
             if busy_key in self._busy:
-                self._reply(
-                    event,
-                    "上一条还在处理，稍等一下～",
-                    reply_to=message_id,
-                    chunk=False,
-                )
+                # 会话忙：静默丢弃，避免连发两句套话
+                print(f"[qq] drop busy user={user_id}")
                 return
             self._busy.add(busy_key)
 
@@ -168,33 +189,44 @@ class MessageRouter:
         def _job() -> None:
             acquired = False
             try:
-                # 文件 + @ → 摘要入库（唯一文件路径烧 Token 点）
+                # 文件 + @：下载落库；同帧文字作别名（落库成功才说记下了）
                 if files and (group_id or not is_group):
                     gid = group_id or "private"
                     records = ingest_file_segments(
                         segments=files,
                         group_id=gid,
                         uploader_id=user_id,
-                        summarize=True,
+                        summarize=not bool(text),  # 有 caption 不烧摘要 Token
                         group_context=group_context,
+                        caption=text or cache_text or "",
                     )
                     ack = format_ingest_reply(records)
                     if ack and not text:
                         self._reply(event, ack, reply_to=message_id)
                         return
                     if ack and text:
-                        # 先回执文件，再处理文字意图
+                        # 同帧图文：回执即完成，不再进 LLM 空口「记住」
                         self._reply(event, ack, reply_to=message_id, chunk=False)
+                        return
 
-                if not text and not files:
-                    self._reply(
-                        event,
-                        "在的，直接说要我记待办、搜文件还是下东西～",
-                        reply_to=message_id,
-                        chunk=False,
-                    )
+                # 空输入 / 语音 ASR 失败防护：绝不进 Agent 吐欢迎套话
+                voice_seg = has_voice_segment(raw)
+                voice_asr = extract_voice_text(raw)
+                bare = (text or "").strip()
+                if bare in ("[语音]",):
+                    bare = ""
+                if not bare and not files:
+                    if voice_seg and not voice_asr:
+                        self._reply(
+                            event,
+                            "刚才没听清，再发一次语音或打字告诉我呗～",
+                            reply_to=message_id,
+                            chunk=False,
+                        )
+                    else:
+                        print(f"[qq] drop empty message user={user_id}")
                     return
-                if not text:
+                if not bare:
                     return
 
                 if not self._sem.acquire(timeout=45):
@@ -211,7 +243,7 @@ class MessageRouter:
                     group_id=group_id,
                     is_group=is_group,
                     nickname=nickname,
-                    text=text,
+                    text=bare,
                     group_context=group_context,
                 )
                 self._reply(
@@ -230,10 +262,35 @@ class MessageRouter:
                 with self._lock:
                     self._busy.discard(busy_key)
 
-        threading.Thread(target=_job, daemon=True).start()
+        from agent.channel.job_queue import submit_job
+        from agent.observability.logging import slog
+        from agent.observability.usage import set_usage_context
+
+        def _wrapped() -> None:
+            set_usage_context(user_id=user_id, group_id=group_id or "")
+            slog(
+                "qq_job_start",
+                user_id=user_id,
+                group_id=group_id,
+                at_bot=at_bot,
+            )
+            _job()
+
+        if not submit_job(_wrapped):
+            self._reply(
+                event,
+                "现在排队的人有点多，稍后再叫我～",
+                reply_to=message_id,
+                chunk=False,
+            )
 
     def _silent_ingest(
-        self, *, files: list, group_id: str, uploader_id: str
+        self,
+        *,
+        files: list,
+        group_id: str,
+        uploader_id: str,
+        caption: str = "",
     ) -> None:
         try:
             records = ingest_file_segments(
@@ -241,10 +298,16 @@ class MessageRouter:
                 group_id=group_id,
                 uploader_id=uploader_id,
                 summarize=False,
+                caption=caption,
+            )
+            ok = sum(
+                1
+                for r in records
+                if r.local_path
             )
             print(
-                f"[files] 静默登记 {len(records)} 个文件 group={group_id} "
-                f"（无摘要 0 Token）"
+                f"[files] 静默登记 {len(records)} 个 group={group_id} "
+                f"落盘={ok} caption={caption[:20]!r}"
             )
         except Exception as e:
             print(f"[files] 静默入库失败: {e}")
@@ -270,6 +333,23 @@ class MessageRouter:
         SESSIONS.append(skey, "user", ctx.text)
         SESSIONS.append(skey, "assistant", reply)
         print(f"[qq] ← reply len={len(reply)}")
+        # 后台静默提炼画像/长期记忆（不挡回复）
+        try:
+            import threading
+
+            from agent.knowledge.harvest import maybe_harvest
+
+            threading.Thread(
+                target=maybe_harvest,
+                kwargs={
+                    "user_id": ctx.user_id,
+                    "text": ctx.text,
+                    "group_id": ctx.storage_group_id,
+                },
+                daemon=True,
+            ).start()
+        except Exception:
+            pass
         return reply
 
     def _reply(

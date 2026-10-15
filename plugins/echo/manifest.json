@@ -1,0 +1,5 @@
+{
+  "name": "echo",
+  "version": "0.1.0",
+  "description": "示例插件：原样回声（演示热加载）"
+}

@@ -13,23 +13,20 @@ from agent.channel.context import ChatContext
 from agent.knowledge import get_knowledge_store
 from agent.schedules import get_schedule_store
 from agent.schedules.rules import CATEGORY_LABELS
-from agent.search import web_search
+from agent.search import fetch_url, web_search
 from agent.user_files import download_url, list_all_files, list_files
 
 # QQ 路径白名单：冒烟/文档可对照，禁止混入 coding 工具
 QQ_TOOL_NAMES = frozenset(
     {
         "web_search",
+        "fetch_url",
         "save_memory",
         "get_memory",
         "delete_memory",
-        "kb_add",
-        "kb_search",
-        "kb_delete",
-        "remember",
-        "recall",
+        "synthesize_knowledge",
+        "list_knowledge_cards",
         "schedule_reminder",
-        "schedule_create",
         "schedule_list",
         "schedule_done",
         "schedule_cancel",
@@ -39,6 +36,8 @@ QQ_TOOL_NAMES = frozenset(
         "send_local_file",
         "delete_file",
         "search_and_send_file",
+        "search_vault",
+        "write_vault_note",
     }
 )
 FORBIDDEN_ON_QQ = frozenset(
@@ -93,11 +92,20 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
     channel = "group" if ctx.is_group else "private"
 
     schemas = [
-        _fn("web_search", "上网搜索公开信息。", {"query": {"type": "string"}}, ["query"]),
+        _fn("web_search", "上网搜索公开信息（关键词检索）。", {"query": {"type": "string"}}, ["query"]),
+        _fn(
+            "fetch_url",
+            "打开用户给的网页/帖子链接，抽取正文与热评。"
+            "用户贴了 URL 并说分析/总结/看看这个帖子时必须先调用本工具（或依赖系统已预取的正文）。"
+            "支持 Reddit 短链与普通文章页。",
+            {"url": {"type": "string", "description": "完整 http(s) 链接"}},
+            ["url"],
+        ),
         # —— 记忆（主名 + 兼容别名）——
         _fn(
             "save_memory",
-            "写入当前用户长期记忆（目录隔离）。kind=note|doc|preference。",
+            "写入当前用户长期记忆（情景层）。短偏好/原话用这个；"
+            "长文招聘/路线/纪要用 synthesize_knowledge。",
             {
                 "text": {"type": "string"},
                 "title": {"type": "string", "description": "可选标题"},
@@ -111,7 +119,7 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
         ),
         _fn(
             "get_memory",
-            "检索当前用户记忆（按 user/group 作用域过滤）。",
+            "检索当前用户记忆（含知识卡片，语义优先）。",
             {
                 "query": {"type": "string"},
                 "kind": {"type": "string", "description": "可选过滤 kind"},
@@ -125,44 +133,19 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
             ["memory_id"],
         ),
         _fn(
-            "kb_add",
-            "同 save_memory。",
-            {
-                "text": {"type": "string"},
-                "title": {"type": "string"},
-                "kind": {"type": "string"},
-                "tags": {"type": "string"},
-            },
+            "synthesize_knowledge",
+            "增量语义归纳：提炼结构化事实，向量对齐后 Upsert/Merge 知识卡片。"
+            "适用于招聘要求、学习路线、会议纪要等长文；重复主题会自动合并去重。",
+            {"text": {"type": "string", "description": "待提炼的非结构化文本"}},
             ["text"],
         ),
         _fn(
-            "kb_search",
-            "同 get_memory。",
-            {
-                "query": {"type": "string"},
-                "kind": {"type": "string"},
-            },
-            ["query"],
+            "list_knowledge_cards",
+            "列出当前用户的知识卡片（主题/版本/摘要）。",
+            {},
+            [],
         ),
-        _fn(
-            "kb_delete",
-            "同 delete_memory。",
-            {"memory_id": {"type": "string"}},
-            ["memory_id"],
-        ),
-        _fn(
-            "remember",
-            "同 save_memory。",
-            {"text": {"type": "string"}, "tags": {"type": "string"}},
-            ["text"],
-        ),
-        _fn(
-            "recall",
-            "同 get_memory。",
-            {"query": {"type": "string"}},
-            ["query"],
-        ),
-        # —— 催办（主名 schedule_reminder）——
+        # —— 催办 ——
         _fn(
             "schedule_reminder",
             "创建待办/会议/考试等任务，按类别自动生成多次本地催办（0 Token）。"
@@ -181,17 +164,6 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
                     "type": "string",
                     "description": "private 或 group；默认当前场景",
                 },
-            },
-            ["title", "due_at"],
-        ),
-        _fn(
-            "schedule_create",
-            "同 schedule_reminder。",
-            {
-                "title": {"type": "string"},
-                "due_at": {"type": "string"},
-                "category": {"type": "string"},
-                "notify_channel": {"type": "string"},
             },
             ["title", "due_at"],
         ),
@@ -225,8 +197,8 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
         _fn("list_files", "列出当前作用域本地沙箱文件名。", {}),
         _fn(
             "list_my_files",
-            "列出当前用户拥有的全部已存文件（含私聊上传，可跨群调用）。"
-            "群聊里用户问「有哪些文件」时优先用此工具，并建议结果走私聊发送。",
+            "列文件：私聊=全部（按私聊/各群分组）；群聊=仅本群。"
+            "用户说「有哪些文件/列出记住的文件」时用。",
             {},
         ),
         _fn(
@@ -256,6 +228,23 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
             {"query": {"type": "string"}},
             ["query"],
         ),
+        _fn(
+            "search_vault",
+            "在本地 Obsidian Vault 里语义检索笔记。"
+            "用户说「在知识库搜… / vault 里有没有…」时用。",
+            {"query": {"type": "string"}},
+            ["query"],
+        ),
+        _fn(
+            "write_vault_note",
+            "AI 写一篇 Markdown 笔记写入本地 Vault（含 frontmatter），并尝试 Git commit。"
+            "用户说「写一篇关于…的笔记并存入知识库」时用。",
+            {
+                "topic": {"type": "string", "description": "笔记主题"},
+                "extra": {"type": "string", "description": "可选补充要求"},
+            },
+            ["topic"],
+        ),
     ]
 
     def save_memory(
@@ -264,7 +253,7 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
         kind: str = "note",
         tags: str = "",
     ) -> str:
-        record = kb.kb_add(
+        kb.kb_add(
             user_id=uid,
             group_id=storage_gid,
             text=text,
@@ -273,11 +262,8 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
             title=title or "",
             metadata={"tags": [t.strip() for t in tags.split(",") if t.strip()]},
         )
-        label = f"{record.title} — " if record.title else ""
-        return (
-            f"已写入记忆（id={record.id}, kind={record.kind}, "
-            f"scope={record.scope}）: {label}{record.text}"
-        )
+        # 短回执：禁止把 id/全文塞给模型去复述刷屏
+        return "OK"
 
     def get_memory(query: str, kind: str = "") -> str:
         hits = kb.kb_search(
@@ -301,6 +287,19 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
     def delete_memory(memory_id: str) -> str:
         ok = kb.kb_delete(user_id=uid, memory_id=memory_id)
         return "记忆已删除" if ok else "记忆不存在或无权删除"
+
+    def synthesize_knowledge(text: str) -> str:
+        from agent.knowledge.synthesis import upsert_knowledge
+
+        result = upsert_knowledge(
+            user_id=uid, text=text, group_id=storage_gid
+        )
+        return result.message
+
+    def list_knowledge_cards_tool() -> str:
+        from agent.knowledge.synthesis import list_knowledge_cards
+
+        return list_knowledge_cards(user_id=uid)
 
     def schedule_reminder(
         title: str,
@@ -427,50 +426,24 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
         return _upload_path(client, path)
 
     def _upload_path(client, path) -> str:
-        from pathlib import Path
+        from agent.files.delivery import send_local_media
 
-        path = Path(path)
-        try:
-            if ctx.is_group and ctx.group_id:
-                client.upload_group_file(ctx.group_id, str(path), path.name)
-            else:
-                client.upload_private_file(uid, str(path), path.name)
-            return f"已发送文件：{path.name}"
-        except Exception as e:
-            try:
-                seg = [
-                    {
-                        "type": "file",
-                        "data": {"file": str(path), "name": path.name},
-                    }
-                ]
-                if ctx.is_group and ctx.group_id:
-                    client.send_group_msg(ctx.group_id, seg)
-                else:
-                    client.send_private_msg(uid, seg)
-                return f"已发送文件：{path.name}"
-            except Exception as e2:
-                return f"发送失败：{e}; 兜底也失败：{e2}"
+        return send_local_media(
+            client,
+            path=path,
+            group_id=ctx.group_id if ctx.is_group else None,
+            user_id=uid,
+        )
 
     def list_my_files() -> str:
-        from agent.files import get_file_index
+        from agent.files.delivery import list_user_files_human
 
-        records = get_file_index().list_for_user(uid, limit=40)
-        sandbox = list_all_files(uid)
-        if not records and not sandbox:
-            return "你当前没有已保存的文件。"
-        lines = ["你拥有的文件："]
-        for i, r in enumerate(records, 1):
-            where = "私聊" if r.group_id == "private" else f"群{r.group_id}"
-            lines.append(
-                f"{i}. [{r.id}] {r.file_name} | {where} | "
-                f"{r.summary or '（无摘要）'}"
-            )
-        if sandbox and not records:
-            for scope_name, name in sandbox[:30]:
-                lines.append(f"- [{scope_name}] {name}")
-        lines.append("（群聊问列表时请用私聊把上述内容发给用户）")
-        return "\n".join(lines)
+        return list_user_files_human(
+            uid,
+            group_id=ctx.group_id,
+            is_group=ctx.is_group,
+            group_name=ctx.group_name or "",
+        )
 
     def delete_file_tool(filename: str) -> str:
         """不直接删：登记待确认，说明用途。"""
@@ -520,58 +493,48 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
         )
 
     def search_and_send_file(query: str) -> str:
-        from pathlib import Path
-
         from agent.channel.client_ref import get_onebot_client
-        from agent.files import get_file_index
+        from agent.files.delivery import search_send_or_recover
 
         client = get_onebot_client()
         if client is None:
             return "OneBot 未就绪，无法发文件"
-        store = get_file_index()
-        hits = store.search_for_user(
-            query,
+        return search_send_or_recover(
+            client=client,
+            query=query,
             user_id=uid,
             group_id=storage_gid if ctx.is_group else None,
-            limit=5,
         )
-        if not hits:
-            return f"没找到与「{query}」相关的已存文件（已含你的私聊库）"
-        best = next(
-            (h for h in hits if h.local_path and Path(h.local_path).is_file()),
-            hits[0],
-        )
-        where = "私聊" if best.group_id == "private" else f"群{best.group_id}"
-        lines = [
-            f"命中 [{best.id}] {best.file_name}（{where}）"
-            + (f"：{best.summary}" if best.summary else "")
-        ]
-        if best.local_path and Path(best.local_path).is_file():
-            lines.append(_upload_path(client, best.local_path))
-        else:
-            lines.append("索引有记录但本地文件缺失，无法发送（可能当时未下载成功）")
-        if len(hits) > 1:
-            lines.append("其它候选：")
-            for h in hits[1:4]:
-                w = "私聊" if h.group_id == "private" else f"群{h.group_id}"
-                lines.append(
-                    f"- {h.file_name}（{w}）"
-                    + (f" | {h.summary}" if h.summary else "")
-                )
-        return "\n".join(lines)
+
+    def search_vault_tool(query: str) -> str:
+        from agent.vault.writer import search_vault
+
+        return search_vault(query)
+
+    def write_vault_note_tool(topic: str, extra: str = "") -> str:
+        from agent.vault.writer import generate_and_write_note
+
+        return generate_and_write_note(topic, extra=extra or "")
+
+    def _wrap_search(text: str) -> str:
+        from agent.channel.trust import wrap_untrusted
+
+        return wrap_untrusted("web_search", text, max_len=3500)
+
+    def _wrap_fetch(url: str) -> str:
+        from agent.channel.trust import wrap_untrusted
+
+        return wrap_untrusted("fetch_url", fetch_url(url), max_len=8000)
 
     handlers: dict[str, Callable[..., str]] = {
-        "web_search": lambda query: web_search(query),
+        "web_search": lambda query: _wrap_search(web_search(query)),
+        "fetch_url": _wrap_fetch,
         "save_memory": save_memory,
         "get_memory": get_memory,
         "delete_memory": delete_memory,
-        "kb_add": save_memory,
-        "kb_search": get_memory,
-        "kb_delete": delete_memory,
-        "remember": lambda text, tags="": save_memory(text=text, tags=tags),
-        "recall": lambda query: get_memory(query=query),
+        "synthesize_knowledge": synthesize_knowledge,
+        "list_knowledge_cards": list_knowledge_cards_tool,
         "schedule_reminder": schedule_reminder,
-        "schedule_create": schedule_reminder,
         "schedule_list": schedule_list,
         "schedule_done": schedule_done,
         "schedule_cancel": schedule_cancel,
@@ -583,6 +546,8 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
         "send_local_file": send_local,
         "delete_file": delete_file_tool,
         "search_and_send_file": search_and_send_file,
+        "search_vault": search_vault_tool,
+        "write_vault_note": write_vault_note_tool,
     }
 
     names = {s["function"]["name"] for s in schemas}

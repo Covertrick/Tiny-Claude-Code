@@ -24,6 +24,7 @@ class FileRecord:
     summary: str
     tags: str
     create_time: str
+    content_hash: str = ""
 
 
 def _safe_name(name: str) -> str:
@@ -68,7 +69,100 @@ class FileIndexStore:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_file_group ON file_index(group_id)"
                 )
+                # 兼容旧库：补 content_hash
+                cols = {
+                    r[1]
+                    for r in conn.execute("PRAGMA table_info(file_index)").fetchall()
+                }
+                if "content_hash" not in cols:
+                    conn.execute(
+                        "ALTER TABLE file_index ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''"
+                    )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_file_hash ON file_index(content_hash)"
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS blob_refs (
+                        content_hash TEXT PRIMARY KEY,
+                        blob_path TEXT NOT NULL DEFAULT '',
+                        ref_count INTEGER NOT NULL DEFAULT 0,
+                        updated_at TEXT NOT NULL DEFAULT ''
+                    )
+                    """
+                )
                 conn.commit()
+            finally:
+                conn.close()
+
+    def register_blob(self, content_hash: str, blob_path: str) -> int:
+        """引用计数 +1，返回当前 ref_count。"""
+        h = (content_hash or "").strip()
+        if not h:
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT ref_count FROM blob_refs WHERE content_hash=?", (h,)
+                ).fetchone()
+                if row:
+                    rc = int(row["ref_count"]) + 1
+                    conn.execute(
+                        "UPDATE blob_refs SET ref_count=?, blob_path=?, updated_at=? "
+                        "WHERE content_hash=?",
+                        (rc, blob_path or "", now, h),
+                    )
+                else:
+                    rc = 1
+                    conn.execute(
+                        "INSERT INTO blob_refs(content_hash, blob_path, ref_count, updated_at) "
+                        "VALUES (?,?,?,?)",
+                        (h, blob_path or "", rc, now),
+                    )
+                conn.commit()
+                return rc
+            finally:
+                conn.close()
+
+    def release_blob(self, content_hash: str) -> int:
+        """引用计数 -1；为 0 时删物理文件。返回剩余 ref_count（-1 表示无记录）。"""
+        h = (content_hash or "").strip()
+        if not h:
+            return -1
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT ref_count, blob_path FROM blob_refs WHERE content_hash=?",
+                    (h,),
+                ).fetchone()
+                if not row:
+                    return -1
+                rc = int(row["ref_count"]) - 1
+                path = row["blob_path"] or ""
+                if rc <= 0:
+                    conn.execute(
+                        "DELETE FROM blob_refs WHERE content_hash=?", (h,)
+                    )
+                    conn.commit()
+                    if path:
+                        try:
+                            p = Path(path)
+                            if p.is_file():
+                                p.unlink()
+                                print(f"[files] GC 删除 blob {h[:12]}…")
+                        except Exception as e:
+                            print(f"[files] GC 删 blob 失败: {e}")
+                    return 0
+                conn.execute(
+                    "UPDATE blob_refs SET ref_count=?, updated_at=? WHERE content_hash=?",
+                    (rc, now, h),
+                )
+                conn.commit()
+                return rc
             finally:
                 conn.close()
 
@@ -91,6 +185,22 @@ class FileIndexStore:
             dest = dest.with_name(f"{stem}_{uuid.uuid4().hex[:6]}{suf}")
         return dest
 
+    def find_by_hash(self, content_hash: str) -> FileRecord | None:
+        h = (content_hash or "").strip()
+        if not h:
+            return None
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM file_index WHERE content_hash=? AND local_path!='' "
+                    "ORDER BY create_time DESC LIMIT 1",
+                    (h,),
+                ).fetchone()
+            finally:
+                conn.close()
+        return self._row(row) if row else None
+
     def add(
         self,
         *,
@@ -100,6 +210,7 @@ class FileIndexStore:
         local_path: str = "",
         summary: str = "",
         tags: str = "",
+        content_hash: str = "",
     ) -> FileRecord:
         record = FileRecord(
             id=uuid.uuid4().hex[:12],
@@ -110,6 +221,7 @@ class FileIndexStore:
             summary=(summary or "").strip(),
             tags=(tags or "").strip(),
             create_time=datetime.now(timezone.utc).isoformat(),
+            content_hash=(content_hash or "").strip(),
         )
         with self._lock:
             conn = self._connect()
@@ -117,8 +229,8 @@ class FileIndexStore:
                 conn.execute(
                     """
                     INSERT INTO file_index
-                    (id, group_id, uploader_id, file_name, local_path, summary, tags, create_time)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, group_id, uploader_id, file_name, local_path, summary, tags, create_time, content_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record.id,
@@ -129,11 +241,27 @@ class FileIndexStore:
                         record.summary,
                         record.tags,
                         record.create_time,
+                        record.content_hash,
                     ),
                 )
                 conn.commit()
             finally:
                 conn.close()
+        if record.content_hash and record.local_path:
+            # 物理 blob 路径优先 _blobs/
+            blob = record.local_path
+            try:
+                p = Path(record.local_path)
+                # 若是硬链到 _blobs，登记 canonical
+                blobs = (self.files_root / "_blobs").resolve()
+                if p.exists():
+                    # 同哈希文件已在 pipeline 写入 _blobs
+                    cand = list(blobs.glob(f"{record.content_hash}*")) if blobs.is_dir() else []
+                    if cand:
+                        blob = str(cand[0])
+            except Exception:
+                pass
+            self.register_blob(record.content_hash, blob)
         return record
 
     def update_summary(self, file_id: str, summary: str, tags: str = "") -> bool:
@@ -291,7 +419,7 @@ class FileIndexStore:
     def delete(
         self, file_id: str, *, user_id: str | None = None
     ) -> FileRecord | None:
-        """删除索引记录；若传 user_id 则校验归属。本地文件一并删。"""
+        """删除索引；引用计数 -1，仅当 ref_count==0 才删物理 blob。"""
         rec = self.get(file_id)
         if not rec:
             return None
@@ -304,13 +432,24 @@ class FileIndexStore:
                 conn.commit()
             finally:
                 conn.close()
+        # 群目录硬链/拷贝可删；blob 走引用计数
         if rec.local_path:
+            try:
+                p = Path(rec.local_path)
+                if p.is_file() and "_blobs" not in str(p).replace("\\", "/"):
+                    p.unlink()
+            except Exception as e:
+                print(f"[files] 删本地索引副本失败 {rec.local_path}: {e}")
+        if rec.content_hash:
+            self.release_blob(rec.content_hash)
+        elif rec.local_path:
+            # 无哈希的旧数据：直接删
             try:
                 p = Path(rec.local_path)
                 if p.is_file():
                     p.unlink()
-            except Exception as e:
-                print(f"[files] 删本地失败 {rec.local_path}: {e}")
+            except Exception:
+                pass
         return rec
 
     def get(self, file_id: str) -> FileRecord | None:
@@ -326,6 +465,7 @@ class FileIndexStore:
 
     @staticmethod
     def _row(row: sqlite3.Row) -> FileRecord:
+        keys = row.keys()
         return FileRecord(
             id=row["id"],
             group_id=row["group_id"],
@@ -335,6 +475,7 @@ class FileIndexStore:
             summary=row["summary"] or "",
             tags=row["tags"] or "",
             create_time=row["create_time"],
+            content_hash=(row["content_hash"] if "content_hash" in keys else "") or "",
         )
 
 

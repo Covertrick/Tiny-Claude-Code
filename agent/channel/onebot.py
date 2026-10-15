@@ -90,7 +90,14 @@ class OneBotClient:
         def _run() -> None:
             while self._running and not is_shutting_down():
                 try:
-                    self._ws.run_forever(ping_interval=20, ping_timeout=10)
+                    # 本地 OneBot 禁止走系统/环境 HTTP 代理（否则 CONNECT 后握手必断）
+                    self._ws.run_forever(
+                        ping_interval=20,
+                        ping_timeout=10,
+                        http_proxy_host=None,
+                        http_proxy_port=None,
+                        proxy_type=None,
+                    )
                 except Exception as e:
                     print(f"[onebot] run_forever 异常: {e}")
                 if not self._running or is_shutting_down():

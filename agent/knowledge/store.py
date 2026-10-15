@@ -1,12 +1,12 @@
-"""多租户知识库：目录隔离 + scope 元数据过滤。
+"""多租户知识库：情景/语义分层 + 访问衰减 + 可替换嵌入。
 
 落盘：
   memory/private_{user_id}/memories.jsonl
-  memory/group_{group_id}/memories.jsonl   # 记录内带 user_id，检索仍按用户过滤
+  memory/group_{group_id}/memories.jsonl
 
-检索：
-  群聊 → scope=group:{gid} 且 user_id 匹配
-  私聊 → 该 user 的 private + 其所有 group 记录（可选只 private；此处私聊可读全部）
+layer:
+  episodic — 原始情景
+  semantic — 归纳后的结构化事实
 """
 
 from __future__ import annotations
@@ -14,14 +14,22 @@ from __future__ import annotations
 import json
 import threading
 import uuid
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from agent.config import MEMORY_DIR, RECALL_TOP_K, VECTOR_DIR, ensure_runtime_dirs
+from agent.config import (
+    MEMORY_DIR,
+    RECALL_MIN_SCORE,
+    RECALL_TOP_K,
+    VECTOR_DIR,
+    ensure_runtime_dirs,
+)
+from agent.embedding import cosine, get_embedder
 
-KB_KINDS = ("note", "doc", "preference")
+KB_KINDS = ("note", "doc", "preference", "fact")
+LAYERS = ("episodic", "semantic")
 
 
 @dataclass
@@ -35,7 +43,11 @@ class MemoryRecord:
     metadata: dict[str, Any]
     kind: str = "note"
     title: str = ""
-    scope: str = ""  # private:{uid} | group:{gid}
+    scope: str = ""
+    layer: str = "episodic"
+    access_count: int = 0
+    last_accessed: str = ""
+    archived: bool = False
 
 
 def scope_for(user_id: str, group_id: str) -> str:
@@ -46,7 +58,6 @@ def scope_for(user_id: str, group_id: str) -> str:
 
 
 def scope_subdir(scope: str) -> str:
-    """scope → 相对目录名 private_{uid} / group_{gid}。"""
     if scope.startswith("private:"):
         return f"private_{scope.split(':', 1)[1]}"
     if scope.startswith("group:"):
@@ -58,27 +69,8 @@ def scope_dir(scope: str, root: Path | None = None) -> Path:
     return (root or MEMORY_DIR) / scope_subdir(scope)
 
 
-class _HashEmbedding:
-    def __init__(self, dim: int = 384):
-        self.dim = dim
-
-    def embed(self, text: str) -> list[float]:
-        import hashlib
-        import math
-        import re
-
-        vec = [0.0] * self.dim
-        tokens = re.findall(r"[\u4e00-\u9fff]{1,2}|[a-zA-Z0-9_]+", text.lower())
-        if not tokens:
-            tokens = [text.lower()[:32] or "empty"]
-        for token in tokens:
-            digest = hashlib.sha256(token.encode("utf-8")).digest()
-            for i in range(0, min(len(digest), 32), 2):
-                idx = int.from_bytes(digest[i : i + 2], "big") % self.dim
-                sign = 1.0 if digest[i] % 2 == 0 else -1.0
-                vec[idx] += sign
-        norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-        return [v / norm for v in vec]
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class KnowledgeStore:
@@ -86,7 +78,7 @@ class KnowledgeStore:
         ensure_runtime_dirs()
         self.root = root or MEMORY_DIR
         self.root.mkdir(parents=True, exist_ok=True)
-        self._embedder = _HashEmbedding()
+        self._embedder = get_embedder()
         self._lock = threading.RLock()
         self._records: list[MemoryRecord] = []
         self._vectors: list[list[float]] = []
@@ -94,7 +86,38 @@ class KnowledgeStore:
         self._load_all()
 
     def _embed_text(self, record: MemoryRecord) -> str:
-        return " ".join(p for p in (record.title, record.kind, record.text) if p)
+        return " ".join(
+            p
+            for p in (record.layer, record.title, record.kind, record.text)
+            if p
+        )
+
+    def _parse_record(self, raw: dict) -> MemoryRecord:
+        user_id = str(raw["user_id"])
+        group_id = str(raw.get("group_id") or "private")
+        scope = raw.get("scope") or scope_for(user_id, group_id)
+        kind = raw.get("kind") or "note"
+        if kind not in KB_KINDS:
+            kind = "note"
+        layer = raw.get("layer") or "episodic"
+        if layer not in LAYERS:
+            layer = "episodic"
+        return MemoryRecord(
+            id=raw["id"],
+            user_id=user_id,
+            group_id=group_id,
+            text=raw["text"],
+            source=raw.get("source") or "group",
+            created_at=raw.get("created_at") or "",
+            metadata=raw.get("metadata") or {},
+            kind=kind,
+            title=str(raw.get("title") or ""),
+            scope=scope,
+            layer=layer,
+            access_count=int(raw.get("access_count") or 0),
+            last_accessed=str(raw.get("last_accessed") or ""),
+            archived=bool(raw.get("archived") or False),
+        )
 
     def _migrate_legacy(self) -> None:
         legacy = VECTOR_DIR / "memories.jsonl"
@@ -104,27 +127,11 @@ class KnowledgeStore:
         if marker.exists():
             return
         try:
-            lines = legacy.read_text(encoding="utf-8").splitlines()
-            for line in lines:
+            for line in legacy.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if not line:
                     continue
-                raw = json.loads(line)
-                user_id = str(raw["user_id"])
-                group_id = str(raw.get("group_id") or "private")
-                scope = scope_for(user_id, group_id)
-                record = MemoryRecord(
-                    id=raw["id"],
-                    user_id=user_id,
-                    group_id=group_id,
-                    text=raw["text"],
-                    source=raw.get("source") or ("private" if group_id == "private" else "group"),
-                    created_at=raw.get("created_at") or "",
-                    metadata=raw.get("metadata") or {},
-                    kind=raw.get("kind") or "note",
-                    title=str(raw.get("title") or ""),
-                    scope=scope,
-                )
+                record = self._parse_record(json.loads(line))
                 self._append_disk(record)
             marker.write_text("ok", encoding="utf-8")
         except Exception as e:
@@ -139,25 +146,7 @@ class KnowledgeStore:
                     line = line.strip()
                     if not line:
                         continue
-                    raw = json.loads(line)
-                    user_id = str(raw["user_id"])
-                    group_id = str(raw.get("group_id") or "private")
-                    scope = raw.get("scope") or scope_for(user_id, group_id)
-                    kind = raw.get("kind") or "note"
-                    if kind not in KB_KINDS:
-                        kind = "note"
-                    record = MemoryRecord(
-                        id=raw["id"],
-                        user_id=user_id,
-                        group_id=group_id,
-                        text=raw["text"],
-                        source=raw.get("source") or "group",
-                        created_at=raw.get("created_at") or "",
-                        metadata=raw.get("metadata") or {},
-                        kind=kind,
-                        title=str(raw.get("title") or ""),
-                        scope=scope,
-                    )
+                    record = self._parse_record(json.loads(line))
                     self._records.append(record)
                     self._vectors.append(self._embedder.embed(self._embed_text(record)))
 
@@ -166,10 +155,6 @@ class KnowledgeStore:
         d.mkdir(parents=True, exist_ok=True)
         with (d / "memories.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
-
-    @staticmethod
-    def _cosine(a: list[float], b: list[float]) -> float:
-        return sum(x * y for x, y in zip(a, b))
 
     def remember(
         self,
@@ -181,29 +166,37 @@ class KnowledgeStore:
         metadata: dict[str, Any] | None = None,
         kind: str = "note",
         title: str = "",
+        layer: str = "episodic",
     ) -> MemoryRecord:
         text = (text or "").strip()
         if not text:
             raise ValueError("知识内容不能为空")
         kind = kind if kind in KB_KINDS else "note"
+        layer = layer if layer in LAYERS else "episodic"
         title = (title or "").strip()
         scope = scope_for(user_id, group_id)
         meta = dict(metadata or {})
         meta["scope"] = scope
         meta["kind"] = kind
+        meta["layer"] = layer
         if title:
             meta["title"] = title
+        now = _now_iso()
         record = MemoryRecord(
             id=uuid.uuid4().hex[:12],
             user_id=str(user_id),
             group_id=str(group_id or "private"),
             text=text,
             source=source,
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=now,
             metadata=meta,
             kind=kind,
             title=title,
             scope=scope,
+            layer=layer,
+            access_count=0,
+            last_accessed=now,
+            archived=False,
         )
         with self._lock:
             self._records.append(record)
@@ -214,6 +207,10 @@ class KnowledgeStore:
     def kb_add(self, **kwargs: Any) -> MemoryRecord:
         return self.remember(**kwargs)
 
+    def _touch(self, record: MemoryRecord) -> None:
+        record.access_count = int(record.access_count or 0) + 1
+        record.last_accessed = _now_iso()
+
     def recall(
         self,
         *,
@@ -222,8 +219,12 @@ class KnowledgeStore:
         group_id: str | None = None,
         top_k: int | None = None,
         kind: str | None = None,
+        include_archived: bool = False,
+        prefer_semantic: bool = True,
+        min_score: float | None = None,
     ) -> list[tuple[MemoryRecord, float]]:
         top_k = top_k or RECALL_TOP_K
+        floor = RECALL_MIN_SCORE if min_score is None else float(min_score)
         qvec = self._embedder.embed(query or "")
         hits: list[tuple[MemoryRecord, float]] = []
         with self._lock:
@@ -234,18 +235,53 @@ class KnowledgeStore:
                     continue
                 if kind and record.kind != kind:
                     continue
-                # scope 双重校验
+                if record.archived and not include_archived:
+                    continue
                 if group_id is not None:
                     expect = scope_for(user_id, group_id)
                     if record.scope and record.scope != expect:
-                        # 允许旧数据缺 scope
                         if record.scope.startswith("group:") or record.scope.startswith(
                             "private:"
                         ):
                             continue
-                hits.append((record, self._cosine(qvec, vec)))
-        hits.sort(key=lambda x: x[1], reverse=True)
-        return hits[:top_k]
+                score = cosine(qvec, vec)
+                # 语义层加权；长期未访问降权（艾宾浩斯近似）
+                if prefer_semantic and record.layer == "semantic":
+                    score += 0.05
+                score *= self._decay_weight(record)
+                if score < floor:
+                    continue
+                hits.append((record, score))
+            hits.sort(key=lambda x: x[1], reverse=True)
+            out = hits[:top_k]
+            # 命中即 touch，并重写该 scope 落盘
+            touched_scopes: set[str] = set()
+            for rec, _ in out:
+                self._touch(rec)
+                if rec.scope:
+                    touched_scopes.add(rec.scope)
+            for sc in touched_scopes:
+                self._rewrite_scope(sc)
+        return out
+
+    @staticmethod
+    def _decay_weight(record: MemoryRecord) -> float:
+        """访问越多权重越高；越久未访问权重越低。"""
+        base = 1.0 + min(0.3, 0.02 * int(record.access_count or 0))
+        last = record.last_accessed or record.created_at
+        if not last:
+            return base * (0.5 if record.layer == "episodic" else 1.0)
+        try:
+            dt = datetime.fromisoformat(last)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            days = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400)
+        except Exception:
+            return base
+        # 半衰期约 14 天
+        decay = 0.5 ** (days / 14.0)
+        floor = 0.35 if record.layer == "semantic" else 0.2
+        return base * max(floor, decay)
 
     def kb_search(self, **kwargs: Any) -> list[tuple[MemoryRecord, float]]:
         return self.recall(**kwargs)
@@ -270,6 +306,133 @@ class KnowledgeStore:
 
     def kb_delete(self, **kwargs: Any) -> bool:
         return self.delete(**kwargs)
+
+    def get(self, *, user_id: str, memory_id: str) -> MemoryRecord | None:
+        with self._lock:
+            for record in self._records:
+                if str(record.user_id) == str(user_id) and record.id == memory_id:
+                    return record
+        return None
+
+    def list_for_user(
+        self, *, user_id: str, limit: int = 100, include_archived: bool = True
+    ) -> list[MemoryRecord]:
+        with self._lock:
+            recs = [
+                r
+                for r in self._records
+                if str(r.user_id) == str(user_id)
+                and (include_archived or not r.archived)
+            ]
+            recs.sort(key=lambda r: r.created_at or "", reverse=True)
+            return recs[:limit]
+
+    def update_record(
+        self,
+        *,
+        memory_id: str,
+        user_id: str,
+        text: str | None = None,
+        title: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        source: str | None = None,
+        layer: str | None = None,
+        kind: str | None = None,
+    ) -> MemoryRecord | None:
+        """原地更新条目并重算嵌入（Upsert 物理刷新）。"""
+        with self._lock:
+            for i, record in enumerate(self._records):
+                if record.id != memory_id or str(record.user_id) != str(user_id):
+                    continue
+                if text is not None:
+                    record.text = text.strip()
+                if title is not None:
+                    record.title = title.strip()
+                if source is not None:
+                    record.source = source
+                if layer is not None and layer in LAYERS:
+                    record.layer = layer
+                if kind is not None and kind in KB_KINDS:
+                    record.kind = kind
+                if metadata is not None:
+                    record.metadata = dict(metadata)
+                    record.metadata["scope"] = record.scope
+                    record.metadata["kind"] = record.kind
+                    record.metadata["layer"] = record.layer
+                    if record.title:
+                        record.metadata["title"] = record.title
+                record.last_accessed = _now_iso()
+                self._vectors[i] = self._embedder.embed(self._embed_text(record))
+                self._rewrite_scope(record.scope)
+                return record
+        return None
+
+    def archive_stale(
+        self,
+        *,
+        max_age_days: float = 21,
+        min_access: int = 1,
+        only_episodic: bool = True,
+    ) -> int:
+        """遗忘：长期低访问情景记忆归档（不删，检索默认跳过）。"""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        n = 0
+        scopes: set[str] = set()
+        with self._lock:
+            for rec in self._records:
+                if rec.archived:
+                    continue
+                if only_episodic and rec.layer != "episodic":
+                    continue
+                if int(rec.access_count or 0) >= min_access and rec.layer == "semantic":
+                    continue
+                stamp = rec.last_accessed or rec.created_at
+                try:
+                    dt = datetime.fromisoformat(stamp)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                except Exception:
+                    continue
+                if dt < cutoff and int(rec.access_count or 0) < max(2, min_access + 1):
+                    rec.archived = True
+                    n += 1
+                    if rec.scope:
+                        scopes.add(rec.scope)
+            for sc in scopes:
+                self._rewrite_scope(sc)
+        if n:
+            print(f"[knowledge] 归档低价值情景记忆 {n} 条")
+        return n
+
+    def consolidate_user(
+        self, *, user_id: str, group_id: str = "private", limit: int = 12
+    ) -> int:
+        """增量语义归纳：情景 → 知识卡片 Upsert/Merge。"""
+        from agent.knowledge.synthesis import synthesize_user_episodic
+
+        return synthesize_user_episodic(
+            user_id=user_id, group_id=group_id, limit=limit
+        )
+
+    def consolidate_all(self, *, min_episodic: int = 3) -> int:
+        users: dict[str, int] = {}
+        with self._lock:
+            for r in self._records:
+                if r.archived or r.layer != "episodic":
+                    continue
+                if (r.metadata or {}).get("synthesized"):
+                    continue
+                users[str(r.user_id)] = users.get(str(r.user_id), 0) + 1
+        n = 0
+        for uid, cnt in users.items():
+            if cnt < min_episodic:
+                continue
+            done = self.consolidate_user(user_id=uid)
+            if done:
+                n += 1
+        if n:
+            print(f"[knowledge] 增量卡片归纳完成 {n} 个用户")
+        return n
 
     def _rewrite_scope(self, scope: str) -> None:
         if not scope:

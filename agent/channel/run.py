@@ -8,8 +8,27 @@ from __future__ import annotations
 
 from agent.channel.context import ChatContext
 from agent.channel.prompts import build_system_prompt
+from agent.channel.trust import wrap_untrusted
 from agent.core.loop import agent_loop
+from agent.search import extract_urls, fetch_urls_from_text
 from agent.tools.qq import build_tools
+
+
+def _user_content_with_pages(text: str) -> str:
+    """用户话里带链接时预取正文，省一轮工具往返，也避免模型空口编。"""
+    text = text or ""
+    if not extract_urls(text):
+        return text
+    print(f"[fetch] 预取链接… {extract_urls(text)}")
+    pages = fetch_urls_from_text(text)
+    if not pages:
+        return text
+    block = wrap_untrusted("fetched_pages", pages, max_len=10000)
+    return (
+        f"{text}\n\n"
+        f"（系统已打开上述链接，正文如下；请据此分析/总结，勿编造）\n"
+        f"{block}"
+    )
 
 
 def run_qq_agent(
@@ -25,10 +44,12 @@ def run_qq_agent(
     def system_provider(_messages: list) -> str:
         return system
 
+    user_content = _user_content_with_pages(ctx.text)
+
     messages: list[dict] = [
         {"role": "system", "content": system},
         *history,
-        {"role": "user", "content": ctx.text},
+        {"role": "user", "content": user_content},
     ]
 
     reply = agent_loop(

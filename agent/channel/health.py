@@ -86,8 +86,47 @@ class HealthMonitor:
         try:
             self.client.get_login_info()
             return True
-        except Exception:
+        except Exception as e:
+            # 鉴权失败 → 热更新 Token / Access Token，不硬重启进程
+            if self._is_auth_error(e):
+                self._hot_reload_credentials()
             return False
+
+    @staticmethod
+    def _is_auth_error(err: Exception) -> bool:
+        text = str(err).lower()
+        return any(
+            k in text
+            for k in (
+                "401",
+                "403",
+                "unauthorized",
+                "forbidden",
+                "token",
+                "鉴权",
+                "access_token",
+                "认证",
+            )
+        )
+
+    def _hot_reload_credentials(self) -> None:
+        """重读 webui.json / .env，刷新内存中的 Token。"""
+        try:
+            from agent.bootstrap_napcat import fill_env_from_napcat, reload_agent_config
+            from agent.config import NAPCAT_WEBUI_TOKEN, ONEBOT_ACCESS_TOKEN
+
+            fill_env_from_napcat()
+            reload_agent_config()
+            # OneBot 客户端内存字段
+            if hasattr(self.client, "access_token"):
+                self.client.access_token = ONEBOT_ACCESS_TOKEN
+            print(
+                f"[health] 凭证热更新：webui_token="
+                f"{(NAPCAT_WEBUI_TOKEN or '')[:6]}… "
+                f"onebot_token={'有' if ONEBOT_ACCESS_TOKEN else '无'}"
+            )
+        except Exception as e:
+            print(f"[health] 凭证热更新失败: {e}")
 
     def _notify(self, title: str, body: str) -> None:
         print(f"[health] ALERT {title}: {body}")

@@ -11,6 +11,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from agent.config import SCHEDULE_HORIZON_HOURS, SCHEDULE_RELOAD_MINUTES
 from agent.schedules import ScheduleRecord, get_schedule_store
+from agent.timeutil import TZ_SHANGHAI, ensure_aware_utc, now_utc
 
 if TYPE_CHECKING:
     from agent.channel.onebot import OneBotClient
@@ -29,7 +30,8 @@ class ReminderScheduler:
         self.client = client
         self.horizon_hours = horizon_hours or SCHEDULE_HORIZON_HOURS
         self.reload_minutes = reload_minutes or SCHEDULE_RELOAD_MINUTES
-        self._aps = BackgroundScheduler(timezone=timezone.utc)
+        # 调度器以上海时区理解 cron；落库/比较一律 UTC aware
+        self._aps = BackgroundScheduler(timezone=TZ_SHANGHAI)
         self._started = False
 
     def start(self) -> None:
@@ -62,11 +64,8 @@ class ReminderScheduler:
             return
         if record.status != "pending":
             return
-        remind = datetime.fromisoformat(record.remind_at)
-        if remind.tzinfo is None:
-            remind = remind.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
-        # 超出 horizon 的留给粗粒度扫描再装载
+        remind = ensure_aware_utc(datetime.fromisoformat(record.remind_at))
+        now = now_utc()
         from datetime import timedelta
 
         if remind > now + timedelta(hours=self.horizon_hours):
@@ -84,12 +83,10 @@ class ReminderScheduler:
     def reload_upcoming(self) -> None:
         store = get_schedule_store()
         items = store.pending_within(hours=self.horizon_hours)
-        now = datetime.now(timezone.utc)
+        now = now_utc()
         loaded = 0
         for item in items:
-            remind = datetime.fromisoformat(item.remind_at)
-            if remind.tzinfo is None:
-                remind = remind.replace(tzinfo=timezone.utc)
+            remind = ensure_aware_utc(datetime.fromisoformat(item.remind_at))
             # 已过期：立刻触发（DateTrigger 用 now）
             run_at = remind if remind > now else now
             self._schedule_fire(item.id, run_at)
@@ -98,9 +95,10 @@ class ReminderScheduler:
 
     def _schedule_fire(self, schedule_id: str, run_at: datetime) -> None:
         job_id = f"{_JOB_PREFIX}{schedule_id}"
+        # APScheduler 用上海时区；传入 aware UTC 会自动换算
         self._aps.add_job(
             self._fire,
-            DateTrigger(run_date=run_at),
+            DateTrigger(run_date=ensure_aware_utc(run_at)),
             id=job_id,
             args=[schedule_id],
             replace_existing=True,

@@ -23,11 +23,24 @@ def extract_plain_text(message: Any) -> str:
     return "".join(parts).strip()
 
 
+def has_voice_segment(message: Any) -> bool:
+    """是否含语音段（不论是否已转写）。"""
+    if isinstance(message, str):
+        return "[CQ:record" in message.lower() or "record," in message.lower()
+    if not isinstance(message, list):
+        return False
+    return any(
+        isinstance(seg, dict) and seg.get("type") == "record" for seg in message
+    )
+
+
 def extract_voice_text(message: Any) -> str:
     """从 record 段提取 NapCat/QQ 内置转写文本。"""
     if isinstance(message, str):
         # CQ: [CQ:record,file=xxx,text=转写]
-        m = re.search(r"\[CQ:record,[^\]]*text=([^\],]*)", message)
+        m = re.search(
+            r"\[CQ:record,[^\]]*(?:text|asr)=([^\],]*)", message, re.I
+        )
         return (m.group(1) if m else "").strip()
     if not isinstance(message, list):
         return ""
@@ -45,13 +58,53 @@ def extract_voice_text(message: Any) -> str:
     return " ".join(p for p in parts if p).strip()
 
 
+def extract_face_labels(message: Any) -> str:
+    """表情/图片占位标签，让未 @ 缓存也能「看懂」富媒体。"""
+    labels: list[str] = []
+    if isinstance(message, str):
+        for m in re.finditer(r"\[CQ:(face|image|mface|emoji),([^\]]*)\]", message, re.I):
+            kind = m.group(1).lower()
+            attrs = dict(re.findall(r"(\w+)=([^,\]]+)", m.group(2)))
+            if kind == "face":
+                labels.append(f"[表情id={attrs.get('id') or '?'}]")
+            elif kind in ("image", "mface"):
+                name = attrs.get("summary") or attrs.get("file") or "图片"
+                labels.append(f"[用户发了图片:{name}]")
+            else:
+                labels.append("[表情]")
+        return " ".join(labels)
+    if not isinstance(message, list):
+        return ""
+    for seg in message:
+        if not isinstance(seg, dict):
+            continue
+        kind = seg.get("type")
+        data = seg.get("data") or {}
+        if kind == "face":
+            labels.append(f"[表情id={data.get('id') or '?'}]")
+        elif kind in ("image", "mface"):
+            # 无明确业务文件名时也进缓存标签（与附件入库策略分离）
+            name = data.get("summary") or data.get("name") or data.get("file") or "图片"
+            labels.append(f"[用户发了图片:{name}]")
+        elif kind == "forward":
+            labels.append("[合并转发消息]")
+        elif kind == "json" and "地图" in str(data):
+            labels.append("[位置分享]")
+    return " ".join(labels)
+
+
 def extract_cache_text(message: Any) -> str:
-    """滑动窗口用：纯文本 + 语音转写（有则拼上）。"""
+    """滑动窗口用：纯文本 + 语音转写 + 表情/图片标签。"""
     plain = extract_plain_text(message)
     voice = extract_voice_text(message)
-    if plain and voice and voice not in plain:
-        return f"{plain} {voice}".strip()
-    return plain or voice
+    faces = extract_face_labels(message)
+    parts = [p for p in (plain, voice, faces) if p]
+    # 去重拼接
+    out = []
+    for p in parts:
+        if p not in out:
+            out.append(p)
+    return " ".join(out).strip()
 
 
 def extract_file_segments(message: Any) -> list[dict[str, str]]:
@@ -83,20 +136,32 @@ def extract_file_segments(message: Any) -> list[dict[str, str]]:
         kind = seg.get("type")
         if kind not in ("file", "image"):
             continue
-        # 纯表情图常无业务文件名，image 仅当带明确 name/file 时收录
         data = seg.get("data") or {}
+        url = str(data.get("url") or "")
+        path = str(data.get("path") or "")
+        file_id = str(data.get("file_id") or data.get("id") or "")
         name = str(data.get("name") or data.get("file") or "")
-        if kind == "image" and not data.get("name"):
+        # 表情包/无文件名图片：有 url/path/file_id 也收录，否则「记住上面的图」捞不到
+        if kind == "image" and not name and not (url or path or file_id):
             continue
         if not name:
-            name = kind
+            # 从 url 猜后缀；否则用短 id
+            suffix = ".gif" if "gif" in url.lower() else ".png"
+            if url:
+                m = re.search(r"/([^/?#]+\.(?:gif|png|jpg|jpeg|webp))(?:\?|$)", url, re.I)
+                if m:
+                    name = m.group(1)
+            if not name:
+                stem = (file_id or path or "image")[-16:]
+                stem = re.sub(r"[^\w.\-]+", "_", stem) or "image"
+                name = stem if "." in stem else f"{stem}{suffix}"
         out.append(
             {
                 "kind": str(kind),
                 "name": name,
-                "url": str(data.get("url") or ""),
-                "file_id": str(data.get("file_id") or data.get("id") or ""),
-                "path": str(data.get("path") or data.get("file") or ""),
+                "url": url,
+                "file_id": file_id,
+                "path": path or str(data.get("file") or ""),
             }
         )
     return out

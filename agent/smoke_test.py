@@ -204,8 +204,11 @@ def test_qq_tool_surface() -> None:
     assert "schedule_reminder" in names
     assert "save_memory" in names
     assert "get_memory" in names
+    assert "synthesize_knowledge" in names
+    assert "list_knowledge_cards" in names
     assert "search_and_send_file" in names
     assert "list_my_files" in names
+    assert "kb_add" not in names
     assert "bash" not in names
     assert "edit" not in names
     assert "create_task" not in names
