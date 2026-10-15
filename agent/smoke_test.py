@@ -205,6 +205,7 @@ def test_qq_tool_surface() -> None:
     assert "save_memory" in names
     assert "get_memory" in names
     assert "search_and_send_file" in names
+    assert "list_my_files" in names
     assert "bash" not in names
     assert "edit" not in names
     assert "create_task" not in names

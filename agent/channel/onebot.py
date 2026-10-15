@@ -8,6 +8,7 @@ import time
 import uuid
 from typing import Any, Callable
 
+from agent.channel.lifecycle import is_shutting_down
 from agent.config import ONEBOT_ACCESS_TOKEN, ONEBOT_WS_URL
 
 
@@ -87,12 +88,12 @@ class OneBotClient:
         )
 
         def _run() -> None:
-            while self._running:
+            while self._running and not is_shutting_down():
                 try:
                     self._ws.run_forever(ping_interval=20, ping_timeout=10)
                 except Exception as e:
                     print(f"[onebot] run_forever 异常: {e}")
-                if not self._running:
+                if not self._running or is_shutting_down():
                     break
                 print("[onebot] 5 秒后重连…")
                 time.sleep(5)

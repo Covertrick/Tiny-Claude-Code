@@ -14,7 +14,7 @@ from agent.knowledge import get_knowledge_store
 from agent.schedules import get_schedule_store
 from agent.schedules.rules import CATEGORY_LABELS
 from agent.search import web_search
-from agent.user_files import delete_file, download_url, list_files
+from agent.user_files import download_url, list_all_files, list_files
 
 # QQ 路径白名单：冒烟/文档可对照，禁止混入 coding 工具
 QQ_TOOL_NAMES = frozenset(
@@ -35,6 +35,7 @@ QQ_TOOL_NAMES = frozenset(
         "schedule_cancel",
         "download_file",
         "list_files",
+        "list_my_files",
         "send_local_file",
         "delete_file",
         "search_and_send_file",
@@ -221,23 +222,37 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
             },
             ["url"],
         ),
-        _fn("list_files", "列出当前作用域本地文件。", {}),
+        _fn("list_files", "列出当前作用域本地沙箱文件名。", {}),
+        _fn(
+            "list_my_files",
+            "列出当前用户拥有的全部已存文件（含私聊上传，可跨群调用）。"
+            "群聊里用户问「有哪些文件」时优先用此工具，并建议结果走私聊发送。",
+            {},
+        ),
         _fn(
             "send_local_file",
-            "把已下载到本地的文件发回给当前用户（群或私聊）。",
-            {"filename": {"type": "string"}},
+            "把已下载到本地的文件发回给当前用户（群或私聊）。"
+            "群聊中也可发送私聊沙箱里的文件。",
+            {
+                "filename": {"type": "string"},
+                "from_private": {
+                    "type": "boolean",
+                    "description": "true 时优先从私聊沙箱取文件",
+                },
+            },
             ["filename"],
         ),
         _fn(
             "delete_file",
-            "删除当前作用域本地文件。",
+            "按文件名或 id 准备删除用户文件：返回用途说明并要求用户回复「确认删除」。"
+            "不要在用户未确认时真正删除。",
             {"filename": {"type": "string"}},
             ["filename"],
         ),
         _fn(
             "search_and_send_file",
-            "按摘要/文件名/tags 模糊检索群文件索引，找到后发给当前用户。"
-            "例如 query=张三的简历。",
+            "按摘要/文件名/tags 模糊检索用户文件（含私聊上传 + 当前群），找到后发给当前用户。"
+            "例如 query=张三的简历。群聊里可以调出私聊保存过的文件。",
             {"query": {"type": "string"}},
             ["query"],
         ),
@@ -383,18 +398,32 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
         )
         return f"已下载到本地: {path}（需要时可用 send_local_file 发回）"
 
-    def send_local(filename: str) -> str:
+    def send_local(filename: str, from_private: bool = False) -> str:
         from agent.channel.client_ref import get_onebot_client
         from agent.user_files import user_dir
 
         client = get_onebot_client()
         if client is None:
             return "OneBot 未就绪，无法发文件"
-        path = user_dir(uid, scope) / filename
-        if not path.is_file():
-            names = list_files(uid, scope)
-            hint = "、".join(names[:8]) if names else "（空）"
-            return f"找不到文件 {filename}。当前有：{hint}"
+        candidates = []
+        if from_private or ctx.is_group:
+            candidates.append(user_dir(uid, None) / filename)  # private
+        candidates.append(user_dir(uid, scope) / filename)
+        path = next((p for p in candidates if p.is_file()), None)
+        if path is None:
+            # 索引里找本人文件
+            from agent.files import get_file_index
+
+            hits = get_file_index().find_by_name(uid, filename, limit=1)
+            if hits and hits[0].local_path:
+                from pathlib import Path
+
+                p = Path(hits[0].local_path)
+                if p.is_file():
+                    return _upload_path(client, p)
+            all_names = [n for _, n in list_all_files(uid)][:8]
+            hint = "、".join(all_names) if all_names else "（空）"
+            return f"找不到文件 {filename}。你有：{hint}"
         return _upload_path(client, path)
 
     def _upload_path(client, path) -> str:
@@ -423,6 +452,73 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
             except Exception as e2:
                 return f"发送失败：{e}; 兜底也失败：{e2}"
 
+    def list_my_files() -> str:
+        from agent.files import get_file_index
+
+        records = get_file_index().list_for_user(uid, limit=40)
+        sandbox = list_all_files(uid)
+        if not records and not sandbox:
+            return "你当前没有已保存的文件。"
+        lines = ["你拥有的文件："]
+        for i, r in enumerate(records, 1):
+            where = "私聊" if r.group_id == "private" else f"群{r.group_id}"
+            lines.append(
+                f"{i}. [{r.id}] {r.file_name} | {where} | "
+                f"{r.summary or '（无摘要）'}"
+            )
+        if sandbox and not records:
+            for scope_name, name in sandbox[:30]:
+                lines.append(f"- [{scope_name}] {name}")
+        lines.append("（群聊问列表时请用私聊把上述内容发给用户）")
+        return "\n".join(lines)
+
+    def delete_file_tool(filename: str) -> str:
+        """不直接删：登记待确认，说明用途。"""
+        from agent.channel.pending import set_pending_delete
+        from agent.files import get_file_index
+
+        store = get_file_index()
+        hits = store.find_by_name(uid, filename, limit=3)
+        if not hits:
+            # 沙箱直删仍要求确认：构造伪 pending
+            names = list_files(uid, scope)
+            if filename not in names:
+                priv = list_files(uid, None)
+                if filename not in priv:
+                    return f"没找到文件「{filename}」。可先 list_my_files。"
+            set_pending_delete(
+                user_id=uid,
+                file_id=f"sandbox:{filename}",
+                file_name=filename,
+                summary="沙箱本地文件（无索引摘要）",
+                local_path="",
+            )
+            return (
+                f"即将删除沙箱文件：{filename}\n"
+                f"这个文件是干什么的：本地下载/保存的文件（无摘要）\n"
+                f"确认删除请让用户回复「确认删除」，取消回「取消」。"
+            )
+        if len(hits) > 1:
+            lines = [f"多个匹配「{filename}」，请用更精确的名字或 id："]
+            for h in hits:
+                lines.append(f"- [{h.id}] {h.file_name}：{h.summary or '无摘要'}")
+            return "\n".join(lines)
+        rec = hits[0]
+        set_pending_delete(
+            user_id=uid,
+            file_id=rec.id,
+            file_name=rec.file_name,
+            summary=rec.summary or "",
+            local_path=rec.local_path or "",
+        )
+        where = "私聊" if rec.group_id == "private" else f"群{rec.group_id}"
+        return (
+            f"即将删除：{rec.file_name} [{rec.id}]\n"
+            f"来源：{where}\n"
+            f"这个文件是干什么的：{rec.summary or '（无摘要）'}\n"
+            f"请让用户回复「确认删除」或「取消」。"
+        )
+
     def search_and_send_file(query: str) -> str:
         from pathlib import Path
 
@@ -432,17 +528,22 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
         client = get_onebot_client()
         if client is None:
             return "OneBot 未就绪，无法发文件"
-        gid = storage_gid if ctx.is_group else None
-        hits = get_file_index().search(query, group_id=gid, limit=5)
-        if not hits and ctx.is_group:
-            # 放宽：同用户上传过的
-            hits = get_file_index().search(query, group_id=None, limit=5)
+        store = get_file_index()
+        hits = store.search_for_user(
+            query,
+            user_id=uid,
+            group_id=storage_gid if ctx.is_group else None,
+            limit=5,
+        )
         if not hits:
-            return f"没找到与「{query}」相关的已存文件"
-        # 优先有本地路径的
-        best = next((h for h in hits if h.local_path and Path(h.local_path).is_file()), hits[0])
+            return f"没找到与「{query}」相关的已存文件（已含你的私聊库）"
+        best = next(
+            (h for h in hits if h.local_path and Path(h.local_path).is_file()),
+            hits[0],
+        )
+        where = "私聊" if best.group_id == "private" else f"群{best.group_id}"
         lines = [
-            f"命中 [{best.id}] {best.file_name}"
+            f"命中 [{best.id}] {best.file_name}（{where}）"
             + (f"：{best.summary}" if best.summary else "")
         ]
         if best.local_path and Path(best.local_path).is_file():
@@ -452,8 +553,9 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
         if len(hits) > 1:
             lines.append("其它候选：")
             for h in hits[1:4]:
+                w = "私聊" if h.group_id == "private" else f"群{h.group_id}"
                 lines.append(
-                    f"- {h.file_name}"
+                    f"- {h.file_name}（{w}）"
                     + (f" | {h.summary}" if h.summary else "")
                 )
         return "\n".join(lines)
@@ -477,10 +579,9 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
         "list_files": lambda: (
             "文件列表：\n" + ("\n".join(list_files(uid, scope)) or "(空)")
         ),
+        "list_my_files": list_my_files,
         "send_local_file": send_local,
-        "delete_file": lambda filename: (
-            "已删除" if delete_file(uid, filename, scope) else "文件不存在"
-        ),
+        "delete_file": delete_file_tool,
         "search_and_send_file": search_and_send_file,
     }
 

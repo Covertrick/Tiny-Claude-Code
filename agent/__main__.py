@@ -12,6 +12,7 @@ import time
 
 from agent.channel.client_ref import set_onebot_client
 from agent.channel.health import HealthMonitor
+from agent.channel.lifecycle import is_shutting_down, on_shutdown
 from agent.channel.onebot import OneBotClient
 from agent.channel.proactive import register_morning_brief
 from agent.channel.router import MessageRouter
@@ -42,7 +43,10 @@ def main() -> None:
     print(f" 主人 QQ: {OWNER_QQ or '(未配置 QQ_OWNER_QQ，早报/关键词告警关闭)'}")
     print(f" 关键词: {', '.join(ALERT_KEYWORDS) or '(无)'}")
     print("=" * 50)
-    print("群聊：未@只缓存；语音转写进窗口；@+文件才摘要。Ctrl+C 退出\n")
+    print(
+        "群聊：未@只缓存；「保存上面的文件」可回捞；"
+        "文件列表走私聊；异地登录自动退出。Ctrl+C 退出\n"
+    )
 
     router: MessageRouter | None = None
     scheduler: ReminderScheduler | None = None
@@ -65,8 +69,30 @@ def main() -> None:
     health = HealthMonitor(client)
     health.start()
 
+    def _cleanup(_reason: str) -> None:
+        try:
+            if health:
+                health.stop()
+        except Exception:
+            pass
+        try:
+            if scheduler:
+                scheduler.stop()
+        except Exception:
+            pass
+        set_reminder_scheduler(None)
+        set_onebot_client(None)
+        try:
+            client.close()
+        except Exception:
+            pass
+
+    on_shutdown(_cleanup)
+
     for _ in range(20):
         time.sleep(0.5)
+        if is_shutting_down():
+            return
         try:
             info = client.get_login_info()
             qq = str(info.get("user_id") or "")
@@ -80,17 +106,12 @@ def main() -> None:
         print("[warn] 未拿到登录信息，请检查 NapCat WebSocket")
 
     try:
-        while True:
+        while not is_shutting_down():
             time.sleep(1)
     except KeyboardInterrupt:
         print("\n正在退出…")
-        if health:
-            health.stop()
-        if scheduler:
-            scheduler.stop()
-        set_reminder_scheduler(None)
-        set_onebot_client(None)
-        client.close()
+        _cleanup("KeyboardInterrupt")
+
 
 
 if __name__ == "__main__":

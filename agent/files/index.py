@@ -171,6 +171,8 @@ class FileIndexStore:
         query: str,
         *,
         group_id: str | None = None,
+        uploader_id: str | None = None,
+        include_private: bool = False,
         limit: int = 5,
     ) -> list[FileRecord]:
         tokens = self._tokens(query)
@@ -178,10 +180,17 @@ class FileIndexStore:
             return []
         sql = "SELECT * FROM file_index WHERE 1=1"
         args: list[Any] = []
-        if group_id is not None:
+        if group_id is not None and include_private:
+            # 当前群 + 私聊库（群聊里调用私聊上传的文件）
+            sql += " AND (group_id=? OR group_id=?)"
+            args.extend([str(group_id), "private"])
+        elif group_id is not None:
             sql += " AND group_id=?"
             args.append(str(group_id))
-        sql += " ORDER BY create_time DESC LIMIT 200"
+        if uploader_id is not None:
+            sql += " AND uploader_id=?"
+            args.append(str(uploader_id))
+        sql += " ORDER BY create_time DESC LIMIT 300"
         with self._lock:
             conn = self._connect()
             try:
@@ -197,6 +206,112 @@ class FileIndexStore:
                 scored.append((score, rec))
         scored.sort(key=lambda x: (-x[0], x[1].create_time))
         return [r for _, r in scored[:limit]]
+
+    def search_for_user(
+        self,
+        query: str,
+        *,
+        user_id: str,
+        group_id: str | None = None,
+        limit: int = 5,
+    ) -> list[FileRecord]:
+        """群聊可命中：本群文件 + 该用户私聊上传 + 该用户任意上传。"""
+        tokens = self._tokens(query)
+        if not tokens:
+            return self.list_for_user(user_id, limit=limit)
+        sql = """
+            SELECT * FROM file_index
+            WHERE uploader_id=? OR group_id=? OR group_id=?
+            ORDER BY create_time DESC LIMIT 400
+        """
+        gid = str(group_id) if group_id else "__none__"
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    sql, (str(user_id), gid, "private")
+                ).fetchall()
+            finally:
+                conn.close()
+        scored: list[tuple[int, FileRecord]] = []
+        for row in rows:
+            rec = self._row(row)
+            # 私聊文件必须是本人上传；群文件任意；本人上传任意群也可
+            if rec.group_id == "private" and rec.uploader_id != str(user_id):
+                continue
+            if (
+                rec.group_id not in (gid, "private")
+                and rec.uploader_id != str(user_id)
+            ):
+                continue
+            blob = f"{rec.file_name} {rec.summary} {rec.tags}"
+            score = sum(1 for t in tokens if t in blob)
+            # 本人私聊文件加权，方便群聊调用
+            if rec.group_id == "private" and rec.uploader_id == str(user_id):
+                score += 1
+            if score > 0:
+                scored.append((score, rec))
+        scored.sort(key=lambda x: (-x[0], x[1].create_time))
+        return [r for _, r in scored[:limit]]
+
+    def list_for_user(self, user_id: str, *, limit: int = 50) -> list[FileRecord]:
+        """用户拥有的文件：本人上传的全部（含私聊/各群）。"""
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM file_index
+                    WHERE uploader_id=?
+                    ORDER BY create_time DESC LIMIT ?
+                    """,
+                    (str(user_id), int(limit)),
+                ).fetchall()
+            finally:
+                conn.close()
+        return [self._row(r) for r in rows]
+
+    def find_by_name(
+        self, user_id: str, name_query: str, *, limit: int = 5
+    ) -> list[FileRecord]:
+        q = (name_query or "").strip()
+        if not q:
+            return []
+        items = self.list_for_user(user_id, limit=200)
+        hits = [
+            r
+            for r in items
+            if q in r.file_name or q in (r.summary or "") or q == r.id
+        ]
+        if not hits:
+            # 模糊：token 匹配
+            return self.search_for_user(q, user_id=user_id, limit=limit)
+        return hits[:limit]
+
+    def delete(
+        self, file_id: str, *, user_id: str | None = None
+    ) -> FileRecord | None:
+        """删除索引记录；若传 user_id 则校验归属。本地文件一并删。"""
+        rec = self.get(file_id)
+        if not rec:
+            return None
+        if user_id is not None and rec.uploader_id != str(user_id):
+            return None
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("DELETE FROM file_index WHERE id=?", (file_id,))
+                conn.commit()
+            finally:
+                conn.close()
+        if rec.local_path:
+            try:
+                p = Path(rec.local_path)
+                if p.is_file():
+                    p.unlink()
+            except Exception as e:
+                print(f"[files] 删本地失败 {rec.local_path}: {e}")
+        return rec
 
     def get(self, file_id: str) -> FileRecord | None:
         with self._lock:

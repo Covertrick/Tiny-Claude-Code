@@ -79,6 +79,19 @@ def list_files(user_id: str, group_id: str | None = None) -> list[str]:
     return sorted(p.name for p in root.iterdir() if p.is_file())
 
 
+def list_all_files(user_id: str) -> list[tuple[str, str]]:
+    """列出用户沙箱全部作用域文件，返回 (scope, name)。"""
+    root = user_root(user_id)
+    out: list[tuple[str, str]] = []
+    for scope_dir in sorted(root.iterdir()):
+        if not scope_dir.is_dir():
+            continue
+        for p in sorted(scope_dir.iterdir()):
+            if p.is_file():
+                out.append((scope_dir.name, p.name))
+    return out
+
+
 def resolve_user_file(
     user_id: str, filename: str, group_id: str | None = None
 ) -> Path:

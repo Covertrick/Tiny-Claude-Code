@@ -9,8 +9,10 @@ import threading
 import time
 
 from agent.channel.context import ChatContext
+from agent.channel.file_cache import RECENT_FILES
 from agent.channel.group_cache import GROUP_CACHE
 from agent.channel.intercept import try_intercept
+from agent.channel.lifecycle import handle_event as handle_lifecycle_event
 from agent.channel.message import (
     extract_cache_text,
     extract_file_segments,
@@ -44,6 +46,10 @@ class MessageRouter:
         self.keywords = KeywordWatcher(client)
 
     def handle_event(self, event: dict) -> None:
+        # 异地登录 / 被踢 → 退出全部进程
+        if handle_lifecycle_event(event):
+            return
+
         if event.get("post_type") != "message":
             return
         msg_type = event.get("message_type")
@@ -65,12 +71,40 @@ class MessageRouter:
         cache_text = extract_cache_text(raw)
         files = extract_file_segments(raw)
 
+        # 群聊附件进近期缓存（供「保存上面的文件」）
+        if is_group and group_id and files:
+            RECENT_FILES.append(
+                group_id,
+                uploader_id=user_id,
+                user=nickname or user_id,
+                segments=files,
+            )
+            if cache_text:
+                GROUP_CACHE.append(
+                    group_id,
+                    user=nickname or user_id,
+                    text=f"{cache_text} [附件:{files[0].get('name') or 'file'}]",
+                )
+            else:
+                names = "、".join(f.get("name") or "file" for f in files[:3])
+                GROUP_CACHE.append(
+                    group_id,
+                    user=nickname or user_id,
+                    text=f"[附件:{names}]",
+                )
+
         # —— 群聊未 @：缓存 + 静默存文件 + 关键词（全 0 Token）——
         if is_group and not at_bot:
-            if cache_text:
+            if cache_text and not files:
                 GROUP_CACHE.append(
                     group_id or "", user=nickname or user_id, text=cache_text
                 )
+                self.keywords.on_group_text(
+                    group_id=group_id or "",
+                    user=nickname or user_id,
+                    text=cache_text,
+                )
+            elif cache_text:
                 self.keywords.on_group_text(
                     group_id=group_id or "",
                     user=nickname or user_id,
@@ -89,7 +123,7 @@ class MessageRouter:
             return
 
         # @ / 私聊
-        if is_group and group_id and cache_text:
+        if is_group and group_id and cache_text and not files:
             GROUP_CACHE.append(group_id, user=nickname or user_id, text=cache_text)
 
         text = strip_at(extract_text(raw), self.bot_qq)
