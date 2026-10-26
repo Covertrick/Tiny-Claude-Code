@@ -56,10 +56,26 @@ def snapshot_metrics() -> dict[str, Any]:
     except Exception as e:
         vec_info = {"error": str(e)}
 
+    harness = {}
+    try:
+        from agent.harness.runtime import get_runtime
+
+        rt = get_runtime()
+        from agent.harness.trace import harness_rates
+
+        harness = {
+            "active_runs": rt.active_runs(),
+            "unknown": rt.unknown_count(),
+            **harness_rates(),
+        }
+    except Exception as e:
+        harness = {"error": str(e)}
+
     return {
         "ts": time.time(),
         "pid": os.getpid(),
         "embedding": embedding_backend(),
+        "harness": harness,
         "http": http_info,
         "vector": vec_info,
         "memory": {

@@ -267,6 +267,7 @@ class KnowledgeStore:
         include_archived: bool = False,
         prefer_semantic: bool = True,
         min_score: float | None = None,
+        touch: bool = True,
     ) -> list[tuple[MemoryRecord, float]]:
         top_k = top_k or RECALL_TOP_K
         floor = RECALL_MIN_SCORE if min_score is None else float(min_score)
@@ -275,21 +276,12 @@ class KnowledgeStore:
         with self._lock:
             eligible: list[tuple[MemoryRecord, list[float]]] = []
             for record, vec in zip(self._records, self._vectors):
-                if str(record.user_id) != str(user_id):
-                    continue
-                if group_id is not None and str(record.group_id) != str(group_id):
+                if not self._visible(record, user_id=user_id, group_id=group_id):
                     continue
                 if kind and record.kind != kind:
                     continue
                 if record.archived and not include_archived:
                     continue
-                if group_id is not None:
-                    expect = scope_for(user_id, group_id)
-                    if record.scope and record.scope != expect:
-                        if record.scope.startswith("group:") or record.scope.startswith(
-                            "private:"
-                        ):
-                            continue
                 eligible.append((record, vec))
 
             by_id = {r.id: (r, v) for r, v in eligible}
@@ -313,10 +305,11 @@ class KnowledgeStore:
                         if score < floor:
                             continue
                         hits.append((record, score))
-                    used_index = True
+                    used_index = bool(hits)
                 except Exception as e:
                     print(f"[knowledge] vector search fallback: {e}")
 
+            # 索引为空或与 JSONL 不同步时，回退内存余弦，避免召回被吃掉
             if not used_index:
                 for record, vec in eligible:
                     score = cosine(qvec, vec)
@@ -327,16 +320,37 @@ class KnowledgeStore:
                         continue
                     hits.append((record, score))
 
+            if not hits and floor > 0.18:
+                # 哈希向量分偏低时再放宽一次，避免「明明记过却说没有」
+                for record, vec in eligible:
+                    score = cosine(qvec, vec)
+                    if prefer_semantic and record.layer == "semantic":
+                        score += 0.05
+                    score *= self._decay_weight(record)
+                    if score < 0.18:
+                        continue
+                    hits.append((record, score))
             hits.sort(key=lambda x: x[1], reverse=True)
             out = hits[:top_k]
-            touched_scopes: set[str] = set()
-            for rec, _ in out:
-                self._touch(rec)
-                if rec.scope:
-                    touched_scopes.add(rec.scope)
-            for sc in touched_scopes:
-                self._rewrite_scope(sc)
+            if touch:
+                touched_scopes: set[str] = set()
+                for rec, _ in out:
+                    self._touch(rec)
+                    if rec.scope:
+                        touched_scopes.add(rec.scope)
+                for sc in touched_scopes:
+                    self._rewrite_scope(sc)
         return out
+
+    @staticmethod
+    def _visible(record: MemoryRecord, *, user_id: str, group_id: str | None) -> bool:
+        """私聊看本人全部；群聊看本群 + 本人私聊，不看别的群。"""
+        if str(record.user_id) != str(user_id):
+            return False
+        if group_id is None:
+            return True
+        gid = str(record.group_id or "private")
+        return gid in (str(group_id), "private")
 
     @staticmethod
     def _decay_weight(record: MemoryRecord) -> float:

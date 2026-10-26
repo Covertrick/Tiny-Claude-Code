@@ -85,6 +85,21 @@ def start_admin_thread(port: int) -> None:
 
         return {"name": name, "ok": reload_plugin(name)}
 
+    @app.get("/harness/runs")
+    def harness_runs(_: dict = Depends(require_owner)):
+        from agent.harness.trace import list_traces
+
+        return {"runs": list_traces()}
+
+    @app.get("/harness/runs/{run_id}")
+    def harness_trace(run_id: str, _: dict = Depends(require_owner)):
+        from agent.harness.trace import trace_for
+
+        data = trace_for(run_id)
+        if data is None:
+            raise HTTPException(404, "run 不存在")
+        return data
+
     @app.get("/sessions")
     def sessions(_: dict = Depends(require_owner)):
         try:

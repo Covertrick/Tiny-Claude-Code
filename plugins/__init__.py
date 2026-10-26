@@ -1,7 +1,7 @@
 """热插拔插件目录（Phase 3）。
 
 每个子包提供：
-  manifest.json  — name / version / description
+  manifest.yaml  — name / version / tools / sandbox
   plugin.py      — register(registry) 
 """
 

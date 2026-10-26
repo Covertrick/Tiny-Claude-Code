@@ -114,6 +114,7 @@ def build_system_prompt(ctx: ChatContext) -> str:
             query=recall_query(ctx.text or ""),
             group_id=ctx.recall_group_id,
             top_k=3,
+            touch=False,
         )
         if hits:
             lines = []
@@ -121,8 +122,7 @@ def build_system_prompt(ctx: ChatContext) -> str:
                 where = f"群{record.group_id}" if record.group_id != "private" else "私聊"
                 title = f"{record.title} | " if record.title else ""
                 lines.append(
-                    f"- [{record.id}] ({record.kind}, {where}, {score:.2f}) "
-                    f"{title}{record.text}"
+                    f"- ({record.kind}, {where}) {title}{record.text}"
                 )
             parts.append("")
             parts.append(
@@ -143,5 +143,15 @@ def build_system_prompt(ctx: ChatContext) -> str:
             ]
             parts.append("")
             parts.append("任务列表预览：\n" + "\n".join(slines))
+
+    try:
+        from agent.harness.evolve.loop import active_guardrails
+
+        rules = active_guardrails().strip()
+        if rules:
+            parts.append("")
+            parts.append("Harness 约束（必须遵守，来自已晋升的 guardrails）：\n" + rules[:1500])
+    except Exception:
+        pass
 
     return "\n".join(parts)

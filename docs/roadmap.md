@@ -1,34 +1,36 @@
 # 路线图
 
-## 已完成 Phase 1–4
+## 叙事定位（2026-10 起）
 
-记忆分层 · 生活助手 · 插件 · Vault · Magic Link Dashboard · CRUD · 公网隧道 · 意图门控
+本项目按 **Agent Harness Runtime** 建设：QQ 是 Adapter，领域能力是 Skill。  
+详细计划见 **[harness-runtime-plan.md](./harness-runtime-plan.md)**（唯一优先级来源）。
 
-## Phase 4.5（本版增强）✅
+应用层功能（记忆 / 文件 / Vault / 催办等）**暂停堆新需求**，深度投入 Runtime。
 
-| 项 | 状态 |
-|----|------|
-| 文件 LLM 摘要+标签 | ✅ |
-| 发送/列表附带元数据 | ✅ |
-| 自然语言文件检索 | ✅ |
-| 结构化用户画像 | ✅ |
-| 对话后静默 harvest | ✅ |
-| 消息处理队列 | ✅ |
-| Token 用量统计 | ✅ |
-| 结构化日志 | ✅ |
-| 日历 ICS 导出 | ✅ |
-| Google/Outlook 双向同步 | ⏸ 接口占位 |
+---
 
-## Phase 5（进行中）
+## 已完成 Phase 1–5（应用层与基建）
 
-| 项 | 状态 |
-|----|------|
-| HTTP 连接池（httpx AsyncClient + 常驻事件循环） | ✅ |
-| LLM `chat` / `chat_async` 走连接池 | ✅ |
-| 强制语义嵌入（`QQ_FORCE_SEMANTIC` + fastembed） | ✅ |
-| 持久向量索引（sqlite-vec / BLOB 回退）knowledge+vault | ✅ |
-| 联网搜索整合（空结果也回应） | ✅ |
-| Google Calendar / Outlook OAuth 双向同步 | ⏸ |
-| PDF/图片 OCR 与缩略图 | ⏸ |
-| 插件市场与远程热更新 | ⏸ |
-| OneBot / NapCat 全程 asyncio 重写 | ⏸ |
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| 1–4 | 记忆分层 · 生活助手 · 插件骨架 · Vault · Dashboard · 意图门控 | ✅ |
+| 4.5 | 文件智能标签 · 画像 harvest · 队列 · usage · ICS | ✅ |
+| 5 | httpx 连接池 · 强制语义 · sqlite-vec · 搜索空结果回应 | ✅ |
+
+---
+
+## Phase 6 —— Harness Runtime（当前主线）
+
+| 优先级 | 内容 | 状态 |
+|--------|------|------|
+| **P0** | Session/Run 状态机 · Skill 契约（effect_class）· intent 账本 · UNKNOWN 恢复 | ✅ |
+| **P1** | 自描述注册表 · 版本快照 · 可逆卸载 · L2 进程沙箱 | ✅ |
+| **P2** | 失败 trace 自改进 · Behavior Diff · 快照回滚 | ✅ |
+| **P3** | Run Trace / 回放面板 · unknown_rate 等指标 | ✅ |
+
+后置（与承重墙无关，不抢优先级）：
+
+- Google Calendar / Outlook OAuth  
+- PDF/图片 OCR  
+- 插件市场与远程热更新  
+- OneBot / NapCat 全程 asyncio 重写  

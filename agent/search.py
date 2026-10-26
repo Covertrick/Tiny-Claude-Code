@@ -66,10 +66,18 @@ def _empty_search_reply(
 
 
 def _ddgs_search(query: str, max_results: int) -> list[dict] | None:
+    DDGS = None
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS as _DDGS
+
+        DDGS = _DDGS
     except ImportError:
-        return None
+        try:
+            from duckduckgo_search import DDGS as _DDGS
+
+            DDGS = _DDGS
+        except ImportError:
+            return None
     try:
         proxy = proxy_url()
         rows = list(DDGS(proxy=proxy).text(query, max_results=max_results))
@@ -82,7 +90,43 @@ def _ddgs_search(query: str, max_results: int) -> list[dict] | None:
             for item in rows
             if item
         ]
-    except Exception:
+    except Exception as e:
+        print(f"[search] ddgs 失败: {e}")
+        return None
+
+
+def _bing_search(query: str, max_results: int) -> list[dict] | None:
+    """DDG 被墙或空结果时的备用公开检索。"""
+    try:
+        url = "https://www.bing.com/search?q=" + urllib.parse.quote(query)
+        status, _final, page = sync_get_text(
+            url,
+            headers={"Accept": "text/html"},
+            timeout=20.0,
+        )
+        if status >= 400 or not page:
+            return None
+        blocks = re.findall(
+            r'<li class="b_algo".*?</li>',
+            page,
+            flags=re.I | re.S,
+        )
+        results = []
+        for block in blocks[:max_results]:
+            m = re.search(r'<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block, re.I | re.S)
+            if not m:
+                continue
+            title = re.sub(r"<[^>]+>", "", m.group(2))
+            title = html_lib.unescape(title).strip()
+            snippet_m = re.search(r'<p[^>]*>(.*?)</p>', block, re.I | re.S)
+            body = ""
+            if snippet_m:
+                body = html_lib.unescape(re.sub(r"<[^>]+>", "", snippet_m.group(1))).strip()
+            if title:
+                results.append({"title": title, "href": m.group(1), "body": body})
+        return results
+    except Exception as e:
+        print(f"[search] bing 失败: {e}")
         return None
 
 
@@ -144,6 +188,13 @@ def web_search(query: str, max_results: int = 5) -> str:
         return json.dumps(rows, ensure_ascii=False, indent=2)
     if rows is None:
         errors.append("duckduckgo-html 请求失败")
+
+    tried.append("bing")
+    rows = _bing_search(q, max_results)
+    if rows:
+        return json.dumps(rows, ensure_ascii=False, indent=2)
+    if rows is None:
+        errors.append("bing 请求失败")
     else:
         errors.append("各通道均无命中")
 

@@ -1,0 +1,8 @@
+name: echo
+version: 0.1.0
+description: 示例插件：回声 + 可撤销定时器
+effect_class: idempotent
+sandbox_policy: none
+permissions: []
+tools:
+  - plugin_echo

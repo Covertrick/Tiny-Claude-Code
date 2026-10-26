@@ -10,6 +10,8 @@ from agent.channel.context import ChatContext
 from agent.channel.prompts import build_system_prompt
 from agent.channel.trust import wrap_untrusted
 from agent.core.loop import agent_loop
+from agent.harness.effect import RunStatus
+from agent.harness.runtime import get_runtime
 from agent.search import extract_urls, fetch_urls_from_text
 from agent.tools.qq import build_tools
 
@@ -38,6 +40,18 @@ def run_qq_agent(
     max_rounds: int = 6,
 ) -> str:
     """用主 agent_loop 处理一条 QQ 消息，返回最终回复文本。"""
+    runtime = get_runtime()
+    # 上次崩溃留下的 UNKNOWN 说明，先讲给用户
+    pending = runtime.consume_notices(
+        "qq", ctx.user_id, ctx.group_id if ctx.is_group else None
+    )
+    run = runtime.start_run(
+        channel="qq",
+        user_id=ctx.user_id,
+        group_id=ctx.group_id if ctx.is_group else None,
+        text=ctx.text or "",
+        require_contract=True,
+    )
     tools, handlers = build_tools(ctx)
     system = build_system_prompt(ctx)
 
@@ -52,15 +66,29 @@ def run_qq_agent(
         {"role": "user", "content": user_content},
     ]
 
-    reply = agent_loop(
-        messages,
-        active_request=ctx.text,
-        tools=tools,
-        handlers=handlers,
-        system_provider=system_provider,
-        use_mcp=False,
-        extract_memory=False,  # QQ 长期记忆走 save_memory，不用 Coding MEMORY.md
-        todo_reminder=False,
-        max_rounds=max_rounds,
+    try:
+        reply = agent_loop(
+            messages,
+            active_request=ctx.text,
+            tools=tools,
+            handlers=handlers,
+            system_provider=system_provider,
+            use_mcp=False,
+            extract_memory=False,  # QQ 长期记忆走 save_memory，不用 Coding MEMORY.md
+            todo_reminder=False,
+            max_rounds=max_rounds,
+        )
+    except Exception as e:
+        runtime.finish(run, status=RunStatus.FAILED, error=str(e))
+        raise
+    text = (reply or "").strip() or "（空回复）"
+    runtime.finish(run, status=RunStatus.SUCCEEDED, reply=text)
+    # 本轮工具若进入 UNKNOWN，说明在 finish 前已写入 session
+    pending.extend(
+        runtime.consume_notices(
+            "qq", ctx.user_id, ctx.group_id if ctx.is_group else None
+        )
     )
-    return (reply or "").strip() or "（空回复）"
+    if pending:
+        text = "\n".join(pending) + "\n" + text
+    return text

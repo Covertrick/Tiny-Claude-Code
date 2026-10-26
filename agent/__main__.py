@@ -36,6 +36,14 @@ def main() -> None:
 
     ensure_runtime_dirs()
     try:
+        from agent.harness.runtime import get_runtime
+
+        recovered = get_runtime().recover_open_runs()
+        if recovered:
+            print(f"[harness] 未完成 Run 已收口 {len(recovered)} 条（UNKNOWN/中止）")
+    except Exception as e:
+        print(f"[harness] 恢复跳过: {e}")
+    try:
         from agent.core.llm import set_usage_hook
         from agent.observability.usage import record_usage_from_api
 

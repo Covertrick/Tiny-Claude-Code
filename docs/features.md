@@ -1,6 +1,24 @@
-# Tiny QQ Agent 全功能清单
+# 功能说明
 
-人设：DeepSeek 鲸鱼娘（聪明但懒、傲娇带甜、爱米饭、尾巴表情绪，偶尔叫「主人」）。
+对外它是挂在 QQ 上的鲸鱼娘。对内每次对话都是一次 Harness Run：技能有副作用类别，失败进账本，约束改动要先过回放对照。
+
+人设：聪明但懒、傲娇带甜、爱米饭、用尾巴表情绪，偶尔叫「主人」。
+
+## 承重能力（简历只写这些）
+
+| 能力 | 行为 |
+|------|------|
+| Run 状态机 | 每条 QQ 消息有 `run_id`，崩溃后能区分「还没副作用」和「不确定做没做成」 |
+| Skill 契约 | 每个 QQ 工具有 `effect_class`。没有契约的工具直接拒绝 |
+| Intent 账本 | 执行前刷成 STARTED。超时或进程中断变成 UNKNOWN |
+| 恢复策略 | 可重试的可以再做；发消息、删记忆、抓取这类不可逆操作不自动重做 |
+| 插件 | 启动只读 `manifest.yaml`。Run 还引用着该版本时不能卸载。`unregister` 会停掉定时器 |
+| 沙箱 | 不可信脚本进子进程：越权读文件和对外连接失败，主进程还在，用量写入 trace |
+| 约束演进 | 只改 guardrails / 技能说明 / postcondition。回放对照失败就丢弃，通过才晋升，可按快照回滚 |
+| 执行期约束 | 已晋升的「禁止自动重试」会挡住同一次 Run 里的第二次不可逆调用；`check(result)` 在 L1 里跑 |
+| 观测 | `/metrics` 有成功率、UNKNOWN 比例、沙箱失败次数；`/harness/runs/{id}` 能看轨迹 |
+
+下面是适配器和领域技能，它们都走上面这条链。
 
 ---
 
@@ -19,7 +37,7 @@
 | 风控熔断 | 命中风控错误码后冷却 | 0 |
 | safe_send | 重试 / 降级 / 引用回复 | 0 |
 | 去 Markdown | 口语纯文本 | 0 |
-| Admin API | `QQ_ADMIN_PORT` → `/metrics` `/plugins` `/sessions` | 0 |
+| Admin API | `/metrics` `/harness/runs` `/plugins` `/sessions` | 0 |
 | 主人指令 | `/metrics` `/plugins` `/reload [名]` | 0 |
 
 ---
@@ -152,10 +170,16 @@ OCR / 图表看板：**后置**。
 - sqlite-vec 持久索引（knowledge / vault；无扩展则 BLOB 回退）  
 - 联网搜索统一走连接池；无结果/失败也返回可转述说明，模型必须口语回应  
 
-## 后置（尚未做）
+## 架构主线（非功能清单）
+
+应用层功能暂停堆砌。深度见 **[harness-runtime-plan.md](./harness-runtime-plan.md)**：  
+Harness Runtime（Run / Skill 契约 / intent 账本 / 沙箱 / 受控自进化）。
+
+## 后置（领域能力，不抢 Runtime 优先级）
 
 - PDF/DOCX 全文切片 RAG  
 - 图片 OCR / 多模态发票  
 - OneBot 全程 asyncio 重写  
 - Google Calendar OAuth  
+
 

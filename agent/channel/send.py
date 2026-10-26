@@ -28,7 +28,7 @@ def strip_markdown(text: str) -> str:
     s = re.sub(r"__(.+?)__", r"\1", s)
     s = re.sub(r"(?<!\w)\*(.+?)\*(?!\w)", r"\1", s)
     s = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", s)
-    s = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", s)
+    s = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 \2", s)
     s = re.sub(r"(?m)^\s*[-*+]\s+", "", s)
     s = re.sub(r"(?m)^>\s?", "", s)
     s = re.sub(r"\n{3,}", "\n\n", s)
@@ -40,16 +40,19 @@ def sanitize_user_reply(text: str) -> str:
     if not text:
         return ""
     s = strip_markdown(text)
-    # 记忆更新长篇自言自语 → 极短确认
-    if re.search(r"(已更新记忆|两条关联|之前那版|以你这次说的为准)", s):
+    s = re.sub(r"</?untrusted_content[^>]*>", "", s, flags=re.I)
+    # 只有短确认才折叠，避免把正常回答（含「摘要」「之前」）整段换掉
+    if len(s) <= 40 and re.search(
+        r"(已更新记忆|两条关联|之前那版|以你这次说的为准)", s
+    ):
         return "记好啦 [OK]"
-    # 工具/后台复述 → 拟人短句
+    # 工具/后台复述 → 拟人短句（必须同时像文件回执，不能只凭「摘要：」）
     if re.search(
         r"(已为你保存|已保存|已登记|已落库|命中\s*\[|已发出图片|已发送文件).{0,120}"
         r"(摘要|file_id|hash|content_hash|\.gif|\.png|\.jpg|表情)",
         s,
         re.I,
-    ) or re.search(r"摘要\s*[:：]", s) or re.search(r"命中\s*\[", s):
+    ) or re.search(r"命中\s*\[", s):
         if re.search(r"(gif|png|jpg|jpeg|webp|表情|图|命中|发出)", s, re.I):
             if re.search(r"(发出|命中|发好)", s):
                 return "来~"

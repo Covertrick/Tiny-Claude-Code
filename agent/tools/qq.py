@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from agent.channel.context import ChatContext
+from agent.harness.qq_skills import assert_covers_qq_tools
 from agent.knowledge import get_knowledge_store
 from agent.schedules import get_schedule_store
 from agent.schedules.rules import CATEGORY_LABELS
@@ -278,10 +279,7 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
         for record, score in hits:
             where = f"群{record.group_id}" if record.group_id != "private" else "私聊"
             title = f"{record.title} | " if record.title else ""
-            lines.append(
-                f"- [{record.id}] ({record.kind}, {where}, {score:.3f}) "
-                f"{title}{record.text}"
-            )
+            lines.append(f"- ({where}) {title}{record.text}")
         return "记忆召回：\n" + "\n".join(lines)
 
     def delete_memory(memory_id: str) -> str:
@@ -553,5 +551,6 @@ def build_tools(ctx: ChatContext) -> tuple[list[dict], dict[str, Callable[..., s
     names = {s["function"]["name"] for s in schemas}
     assert names == set(handlers), "QQ 工具 schema/handler 不一致"
     assert names <= QQ_TOOL_NAMES
+    assert_covers_qq_tools(QQ_TOOL_NAMES)
     assert not (names & FORBIDDEN_ON_QQ), f"QQ 路径混入 coding 工具: {names & FORBIDDEN_ON_QQ}"
     return schemas, handlers

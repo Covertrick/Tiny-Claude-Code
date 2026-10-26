@@ -1,15 +1,13 @@
 # Tiny QQ Agent（鲸鱼娘）
 
-挂在 QQ 上的 DeepSeek 鲸鱼娘：NapCat / OneBot + 自研 Agent Loop。  
-从「能聊天」升级为 **个人知识管理 + 智能文件资产库 + 可视化控制台**。
+挂在 QQ 上的 DeepSeek 鲸鱼娘。QQ 只是适配器，核心是一套小型 Agent Harness：Run 状态机、技能契约、intent 账本、可卸载插件、进程沙箱，以及要先过回放对照才能生效的约束。
 
 ```text
-channel → core → tools.qq
-           ├─ knowledge / profile / vault
-           ├─ files（智能标签·NL 检索·元数据）
-           ├─ schedules + calendar ICS
-           ├─ search（联网搜索 / 打开链接）
-           └─ admin Dashboard（Magic Link / CRUD）
+QQ Adapter → Harness Runtime → Skills
+                 ├─ Run / intent 账本 / UNKNOWN 恢复
+                 ├─ 注册表（版本快照、引用计数）
+                 ├─ 沙箱 none | AST | 子进程
+                 └─ guardrails 晋升 / 回滚
 ```
 
 ## 快速开始
@@ -28,14 +26,13 @@ python -m agent
 
 | 模块 | 亮点 |
 |------|------|
-| 智能文件资产 | LLM 摘要+标签、元数据回执、自然语言「把上次那个 PDF 发我」 |
-| 记忆与画像 | 多租户记忆、意图门控、结构化用户画像、对话后静默提炼 |
-| Vault | Obsidian 监听入库、AI 写笔记、Git commit |
-| 催办 / 日历 | APScheduler 多点催办；「导出日历」生成 ICS |
-| 联网 | 统一 httpx 连接池；搜不到/打不开也会口语回应，不装死 |
-| 控制台 | 待办/记忆/Vault CRUD、预览下载、手机适配 |
-| 可观测 | 结构化日志、Token 用量统计、消息处理队列、发送限流 |
-| HTTP / 向量 | httpx 连接池 + `chat_async`；sqlite-vec / BLOB 持久语义索引 |
+| Harness | Run 状态机、副作用账本、UNKNOWN 不自动重做不可逆操作 |
+| 插件 | manifest 自描述、按需加载、引用中的版本不能卸 |
+| 沙箱 | 不可信脚本进子进程，越权读和对外连接失败，用量进 trace |
+| 约束 | 回放对照通过才写入 guardrails，可按快照回滚；执行期会拦住重复的不可逆调用 |
+| 文件 / 记忆 / Vault / 催办 | 领域技能，走同一套契约，不是另一套机器人逻辑 |
+| 联网 | httpx 连接池；搜不到也会回话 |
+| 控制台 | Magic Link、CRUD，以及 `/harness/runs/{id}` |
 
 ## 话术示例
 
@@ -55,19 +52,16 @@ python -m agent
 ```mermaid
 flowchart TB
   QQ[QQ 用户] --> NC[NapCat]
-  NC <--> CH[channel<br/>队列·限流·引用回复]
-  CH -->|意图门控| LOOP[core.loop]
+  NC <--> CH[channel 适配器]
+  CH --> RUN[Harness Run]
+  RUN --> LOOP[core.loop]
   LOOP --> LLM[DeepSeek]
-  LOOP --> T[tools.qq]
-  T --> F[files 资产库]
-  T --> K[knowledge + profile]
-  T --> V[vault]
-  T --> S[schedules]
-  T --> WSearch[web_search / fetch_url]
-  W[watchdog] --> V
-  CH -->|打开控制台| AD[admin SPA]
-  CF[Cloudflare Tunnel] --> AD
-  LLM -.->|usage| U[usage.db]
+  LOOP --> EX[execute_tool]
+  EX --> LEDGER[intent 账本]
+  EX --> SB[沙箱 none / AST / 子进程]
+  SB --> SK[Skills：文件·记忆·Vault·催办·搜索]
+  RUN --> GR[guardrails 冻结在本次 Run]
+  CH --> AD[控制台 /harness/runs]
 ```
 
 ## 配置要点
@@ -83,11 +77,16 @@ QQ_VECTOR_BACKEND=auto
 # QQ_FETCH_PROXY=http://127.0.0.1:7890
 ```
 
-文档：[docs/README.md](docs/README.md) · [功能清单](docs/features.md) · [路线图](docs/roadmap.md) · [Vault/控制台](docs/vault-dashboard.md)
+文档：[docs/README.md](docs/README.md) · **[Harness 演进计划](docs/harness-runtime-plan.md)** · [功能清单](docs/features.md) · [路线图](docs/roadmap.md)
+
+## 架构主线
+
+QQ 是 Adapter，Harness 是核心，文件、记忆、催办、搜索、Vault、插件是 Skill。  
+Phase 6（Run、账本、契约、沙箱、可回滚约束）已经接在 QQ 消息路径上，见演进计划。
 
 ## 刻意不做 / 后置
 
-OneBot 全程 asyncio 重写、Google Calendar OAuth、PDF OCR —— 见路线图 Phase 5。
+堆新应用功能、插件市场、Calendar OAuth、PDF OCR、OneBot 全量 asyncio —— 不抢 Runtime 优先级。
 
 ## License
 

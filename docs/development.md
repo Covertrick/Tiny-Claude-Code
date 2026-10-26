@@ -1,17 +1,20 @@
 # 开发说明
 
-## 目录与边界
+## 优先级
 
-见 [architecture.md](./architecture.md)。根 README 有功能全表。
+1. 读 [harness-runtime-plan.md](./harness-runtime-plan.md)，按 **P0 → P1 → P2 → P3** 推进。  
+2. 应用层新功能（OCR、日历 OAuth、插件市场等）默认 **拒绝合入**，除非直接服务 Runtime。  
+3. 目录边界见 [architecture.md](./architecture.md)。
+
+## 目录与边界（过渡期）
 
 | 目录 | 职责 | 禁止 |
 |------|------|------|
-| `channel/` | 听/说 QQ、缓存、拦截、拼 Prompt、信号量 | 直接调 DeepSeek HTTP |
-| `core/` | 统一 Agent Loop | 感知 QQ 协议细节 |
-| `tools/qq.py` | QQ 工具白名单 | bash / edit / Task DAG / MCP |
-| `knowledge/` | 多租户记忆目录 | 跨用户读写 |
-| `schedules/` + `scheduler.py` | 任务 list + 本地催办 | 催办走 LLM |
-| `bootstrap_napcat.py` | 补 `.env`、启 NapCat | 替代用户填 API_KEY |
+| `channel/` | QQ Adapter：听/说、缓存、拦截、限流 | 直接定义工具副作用语义 |
+| `core/` | 现有 `agent_loop`（迁入 `harness/` 前的实现） | 感知 OneBot 协议字段 |
+| `harness/` | **目标核心**：Run/账本/契约/沙箱（建设中） | 依赖 QQ API |
+| `tools/qq.py` / `plugins/` | Skill 实现与注册 | 绕过账本直接发不可逆副作用 |
+| `knowledge/` `files/` `vault/` … | 领域 Skill 实现 | 跨用户读写 |
 
 ## 运行
 
@@ -19,30 +22,20 @@
 pip install -r requirements.txt
 # agent/.env 至少 API_KEY
 python -m agent.smoke_test
-python -m agent.demo
-python -m agent                 # 自动引导 NapCat
-powershell -File scripts/start_qqbot.ps1
+python -m agent                 # QQ Adapter + NapCat 引导
 ```
 
-## 路线图（别一次吃完）
+## 简历表述（随 Phase 6 升级）
 
-1. ~~三层绞杀 + QQ 去写码工具~~  
-2. ~~多租户记忆 · 催办 · 文件摘要 · 主动提醒~~  
-3. ~~跨私聊文件 · 删除确认 · 异地登录退出 · 启动引导~~  
-4. ~~令牌桶+抖动熔断 · 凭证热更新 · 滚动摘要 · SHA256 去重 · ZoneInfo · 注入隔离~~  
-5. **后置（重依赖）**：  
-   - 全文 PDF/DOCX 切片 RAG（pypdf 等）  
-   - FastEmbed / onnx + sqlite-vec 语义向量  
-   - 图片 OCR / 多模态视觉  
-   - 全面 asyncio + Redis  
+**现在可诚实写（Phase 1–5）**：
 
-## 简历表述（诚实）
+- 自研 Agent Loop；QQ Adapter 与 Coding CLI 共用循环、工具面隔离  
+- 多租户记忆、催办、文件资产、Vault、连接池与向量索引  
 
-**项目**：基于自研 Agent Loop 的 QQ 智能助手（OneBot / NapCat）
+**对外主句**：
 
-- 事件驱动 OneBot；频道与 Coding CLI 共用 loop，工具面隔离  
-- 用户/群目录隔离记忆 + APScheduler 多点催办（0 Token）  
-- 群未 @ 只缓存；@ 时滑动窗口按需进模型；文件按上下文一句话摘要  
-- 并发信号量控压；异地登录退出；启动自动补配置并拉起 NapCat  
+> 以 QQ 为 Adapter 构建 Agent Harness：Run 状态机、Skill 契约与 intent 账本、版本快照绑定的可逆插件、按策略路由的进程沙箱，以及经回放对照才生效、可按 Run 回滚的约束。
 
-避免写：未实现的 Multi-Agent / LangGraph / Redis / Chroma / 7×24（除非已上服务器守护）。
+**避免写**：未实现的 Multi-Agent / LangGraph / Firecracker / 在线自训练 / 7×24（除非已部署守护）。
+
+面试三个锚点见 harness 计划 §5.2。

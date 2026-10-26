@@ -31,6 +31,18 @@ from ..memory import build_system, consolidate_memories, extract_memories, load_
 from ..tools import TASK_TOOLS, TOOL_HANDLERS
 
 
+def _is_http_overflow(exc: Exception) -> bool:
+    httpish = isinstance(exc, requests.HTTPError)
+    if not httpish:
+        try:
+            import httpx
+
+            httpish = isinstance(exc, httpx.HTTPStatusError)
+        except Exception:
+            httpish = False
+    return httpish and is_context_overflow(exc)
+
+
 def _update_system_message(
     messages: list,
     system_provider: Callable[[list], str] | None = None,
@@ -100,8 +112,9 @@ def agent_loop(
         # 5) 调模型
         try:
             msg = chat(messages, tools=pool_tools, max_tokens=5000)
-        except requests.HTTPError as e:
-            if reactive_retries < MAX_REACTIVE_RETRIES and is_context_overflow(e):
+        except Exception as e:
+            # httpx 抛 HTTPStatusError，不再只认 requests.HTTPError
+            if _is_http_overflow(e) and reactive_retries < MAX_REACTIVE_RETRIES:
                 print("\033[33m[reactive compact] 上下文仍然过长，应急压缩后重试\033[0m")
                 messages[:] = COMPACTOR.reactive_compact(messages, active_request)
                 reactive_retries += 1
@@ -117,7 +130,10 @@ def agent_loop(
             trigger_hook("Stop", messages)
             if extract_memory and extract_memories(messages):
                 consolidate_memories()
-            return last_text or None
+            text_out = (last_text or "").strip()
+            if not text_out and rounds > 1:
+                return "查完了，但这句没写出来。你再说一下想听哪一点。"
+            return text_out or None
 
         # 6b) 执行工具
         tool_results = []
